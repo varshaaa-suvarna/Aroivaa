@@ -1,7 +1,11 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from ..core import *
 r = APIRouter()
+
+NAME_REGEX = re.compile(r"^[A-Za-z\s.'-]{2,100}$")
+
 class HospitalAdminCreate(BaseModel):
     email: EmailStr
     full_name: str
@@ -15,6 +19,11 @@ def create_hospital_admin(
     u=Depends(need("SUPER_ADMIN")),
     c=Depends(db)
 ):
+    name = b.full_name.strip()
+    if any(ch.isdigit() for ch in name):
+        raise HTTPException(422, "Admin full name cannot contain numbers. Only letters and standard name characters are allowed.")
+    if not NAME_REGEX.match(name) or not any(ch.isalpha() for ch in name):
+        raise HTTPException(422, "Admin full name must be at least 2 characters and contain only letters.")
     if len(b.password) < 10:
         raise HTTPException(422, "Password must be at least 10 characters")
 
@@ -73,8 +82,16 @@ def me(u=Depends(current_user)): return u
 class Staff(BaseModel): email: EmailStr; full_name: str; password: str; role: str
 @r.post("/staff")
 def add_staff(b: Staff, u=Depends(need("HOSPITAL_ADMIN")), c=Depends(db)):
-    if b.role not in ("HOSPITAL_ADMIN", "DOCTOR", "OPTOMETRIST", "REGISTRATION") or len(b.password) < 10: raise HTTPException(422, "Bad role or password under 10 chars")
-    row = c.execute("INSERT INTO users(email,full_name,password_hash,role,facility_id) VALUES(%s,%s,%s,%s,%s) RETURNING id", (b.email.lower(), b.full_name, hash_pw(b.password), b.role, u["facility_id"])).fetchone()
+    if b.role not in ("HOSPITAL_ADMIN", "DOCTOR", "OPTOMETRIST", "REGISTRATION"):
+        raise HTTPException(422, "Invalid staff role")
+    if len(b.password) < 10:
+        raise HTTPException(422, "Password must be at least 10 characters")
+    name = b.full_name.strip()
+    if any(ch.isdigit() for ch in name):
+        raise HTTPException(422, "Staff full name cannot contain numbers. Only letters and standard name characters are allowed.")
+    if not NAME_REGEX.match(name) or not any(ch.isalpha() for ch in name):
+        raise HTTPException(422, "Staff full name must be at least 2 characters and contain only letters.")
+    row = c.execute("INSERT INTO users(email,full_name,password_hash,role,facility_id) VALUES(%s,%s,%s,%s,%s) RETURNING id", (b.email.lower(), name, hash_pw(b.password), b.role, u["facility_id"])).fetchone()
     audit(c, u, "CREATE_STAFF", f"user:{row['id']}"); return row
 @r.get("/staff")
 def staff(u=Depends(need("HOSPITAL_ADMIN")), c=Depends(db)):
@@ -103,6 +120,9 @@ def get_facility(fid: int, u=Depends(current_user), c=Depends(db)):
 class App(BaseModel): hospital_name: str; category: str; registration_no: str | None = None; address: str | None = None; phone: str | None = None; email: str | None = None; rep_name: str; rep_designation: str | None = None; rep_contact: str | None = None
 @r.post("/applications")
 def submit_app(b: App, c=Depends(db)):  # public: a hospital applies before it has any accounts
+    rep = b.rep_name.strip()
+    if any(ch.isdigit() for ch in rep):
+        raise HTTPException(422, "Representative name cannot contain numbers.")
     a = c.execute("INSERT INTO hospital_applications(hospital_name,category,registration_no,address,phone,email,rep_name,rep_designation,rep_contact,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'SUBMITTED') RETURNING id", tuple(b.model_dump().values())).fetchone()
     c.execute("INSERT INTO application_status_history(application_id,to_status) VALUES(%s,'SUBMITTED')", (a["id"],)); c.commit(); return a
 @r.get("/applications")

@@ -1,5 +1,6 @@
 
 import os
+os.environ.setdefault("KERAS_HOME", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".keras"))
 import numpy as np
 import tensorflow as tf
 from PIL import Image

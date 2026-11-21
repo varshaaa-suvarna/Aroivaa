@@ -1,15 +1,37 @@
-import os, hashlib, uuid
+import os, hashlib, uuid, re
 from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from ..core import *
 r = APIRouter()
 CLIN = ("HOSPITAL_ADMIN", "DOCTOR", "OPTOMETRIST", "REGISTRATION")
+
+NAME_REGEX = re.compile(r"^[A-Za-z\s.'-]{2,100}$")
+PHONE_REGEX = re.compile(r"^\+?[0-9]{10,15}$")
+
 class PatientIn(BaseModel): full_name: str; date_of_birth: date; sex: str | None = None; phone: str | None = None; address: str | None = None; abha_id: str | None = None; local_patient_id: str
 @r.post("/patients")
 def register(b: PatientIn, u=Depends(need(*CLIN)), c=Depends(db)):
-    p = c.execute("INSERT INTO patients(full_name,date_of_birth,sex,phone,address,abha_id,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id,arovia_id", (b.full_name.strip(), b.date_of_birth, b.sex, b.phone, b.address, b.abha_id, u["id"])).fetchone()
-    c.execute("INSERT INTO hospital_patient_links(patient_id,facility_id,local_patient_id) VALUES(%s,%s,%s)", (p["id"], u["facility_id"], b.local_patient_id))
+    name = b.full_name.strip()
+    if any(ch.isdigit() for ch in name):
+        raise HTTPException(422, "Patient full name cannot contain numbers. Only letters and standard name characters are allowed.")
+    if not NAME_REGEX.match(name) or not any(ch.isalpha() for ch in name):
+        raise HTTPException(422, "Patient full name must be at least 2 characters and contain only letters.")
+    if b.date_of_birth > date.today():
+        raise HTTPException(422, "Date of birth cannot be in the future.")
+    if b.date_of_birth.year < 1900:
+        raise HTTPException(422, "Please enter a valid date of birth.")
+    if b.phone:
+        clean_phone = re.sub(r"[\s\-()]", "", b.phone)
+        if clean_phone and not PHONE_REGEX.match(clean_phone):
+            raise HTTPException(422, "Phone number must be a valid 10 to 15 digit number.")
+    if b.sex and b.sex not in ("M", "F", "O", "U"):
+        raise HTTPException(422, "Invalid sex selection.")
+    if not b.local_patient_id or not b.local_patient_id.strip():
+        raise HTTPException(422, "Local patient ID is required.")
+
+    p = c.execute("INSERT INTO patients(full_name,date_of_birth,sex,phone,address,abha_id,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id,arovia_id", (name, b.date_of_birth, b.sex, b.phone, b.address, b.abha_id, u["id"])).fetchone()
+    c.execute("INSERT INTO hospital_patient_links(patient_id,facility_id,local_patient_id) VALUES(%s,%s,%s)", (p["id"], u["facility_id"], b.local_patient_id.strip()))
     c.commit(); audit(c, u, "REGISTER_PATIENT", f"patient:{p['id']}", patient_id=p["id"]); return p
 @r.get("/patients")
 def search(q: str = "", limit: int = 25, offset: int = 0, u=Depends(need(*CLIN)), c=Depends(db)):

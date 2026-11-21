@@ -13,6 +13,27 @@ const useForm = (init) => {
 const Err = ({ e }) => (e ? <p className="err">{e}</p> : null);
 const Field = ({ l, ...p }) => <label>{l}<input {...p} /></label>;
 
+// Name and contact validators
+const NAME_REGEX = /^[A-Za-z\s.'-]{2,100}$/;
+const hasDigits = (str) => /\d/.test(str || "");
+const blockNumbers = (e) => {
+  if (/[0-9]/.test(e.key)) {
+    e.preventDefault();
+  }
+};
+const isValidName = (name) => {
+  if (!name || typeof name !== "string") return false;
+  const trimmed = name.trim();
+  if (trimmed.length < 2 || trimmed.length > 100) return false;
+  if (hasDigits(trimmed)) return false;
+  return NAME_REGEX.test(trimmed) && /[A-Za-z]/.test(trimmed);
+};
+const isValidPhone = (phone) => {
+  if (!phone) return true;
+  const clean = String(phone).replace(/[\s\-()]/g, "");
+  return /^\+?[0-9]{10,15}$/.test(clean);
+};
+
 const ROLE_LABELS = {
   SUPER_ADMIN: "Super Admin",
   HOSPITAL_ADMIN: "Hospital Admin",
@@ -96,6 +117,18 @@ function Login({ onLogin }) {
 
     if (!app.hospital_name.trim() || !app.category.trim() || !app.rep_name.trim()) {
       setE("Please complete all required fields (Hospital name, category, and representative).");
+      return;
+    }
+    if (hasDigits(app.rep_name)) {
+      setE("Representative name cannot contain numbers. Only letters are allowed.");
+      return;
+    }
+    if (!isValidName(app.rep_name)) {
+      setE("Please enter a valid representative name (letters only, min 2 characters).");
+      return;
+    }
+    if (app.rep_contact && !isValidPhone(app.rep_contact)) {
+      setE("Representative contact must be a valid 10 to 15 digit phone number.");
       return;
     }
 
@@ -212,9 +245,9 @@ function Login({ onLogin }) {
             <Field l="Official Email" type="email" value={app.email} onChange={setApp("email")} />
 
             <h4 style={{ marginTop: 16 }}>Authorized Representative</h4>
-            <Field l="Representative Name *" required value={app.rep_name} onChange={setApp("rep_name")} />
+            <Field l="Representative Name *" required value={app.rep_name} onChange={setApp("rep_name")} onKeyDown={blockNumbers} pattern="[A-Za-z\s.'-]+" title="Letters only, no numbers allowed" placeholder="e.g. Dr. Ramesh Kumar" />
             <Field l="Designation (e.g. Medical Director, Dean)" value={app.rep_designation} onChange={setApp("rep_designation")} />
-            <Field l="Representative Contact" type="tel" value={app.rep_contact} onChange={setApp("rep_contact")} />
+            <Field l="Representative Contact" type="tel" value={app.rep_contact} onChange={setApp("rep_contact")} pattern="\+?[0-9\s-]{10,15}" title="10-digit phone number" placeholder="e.g. 9876543210" />
 
             <Err e={e} />
             {success && <p className="success">{success}</p>}
@@ -303,6 +336,19 @@ function SuperAdminDashboard() {
   const handleCreateHospitalAdmin = async (ev) => {
     ev.preventDefault();
     setE(""); setMsg("");
+    const cleanName = (adminForm.full_name || "").trim();
+    if (!cleanName) {
+      setE("Please provide administrator full name.");
+      return;
+    }
+    if (hasDigits(cleanName)) {
+      setE("Administrator full name cannot contain numbers. Only letters and standard name characters are allowed.");
+      return;
+    }
+    if (!isValidName(cleanName)) {
+      setE("Please enter a valid administrator full name (letters only, min 2 characters).");
+      return;
+    }
     if (adminForm.password.length < 10) {
       setE("Password must be at least 10 characters.");
       return;
@@ -544,7 +590,7 @@ function SuperAdminDashboard() {
             <h3>Provision Hospital Administrator</h3>
             <p className="muted">Facility ID: #{adminModalFid}</p>
             <form onSubmit={handleCreateHospitalAdmin}>
-              <Field l="Admin Full Name *" required value={adminForm.full_name} onChange={setAdminForm("full_name")} />
+              <Field l="Admin Full Name *" required value={adminForm.full_name} onChange={setAdminForm("full_name")} onKeyDown={blockNumbers} pattern="[A-Za-z\s.'-]+" title="Letters only, no numbers allowed" placeholder="e.g. Dr. Rajesh Sharma" />
               <Field l="Admin Work Email *" type="email" required value={adminForm.email} onChange={setAdminForm("email")} />
               <Field l="Initial Password (min 10 chars) *" type="password" required value={adminForm.password} onChange={setAdminForm("password")} />
               <Err e={e} />
@@ -593,6 +639,19 @@ function HospitalAdminDashboard({ me, openPatient }) {
   const handleCreateStaff = async (ev) => {
     ev.preventDefault();
     setE(""); setMsg("");
+    const cleanName = (staffForm.full_name || "").trim();
+    if (!cleanName) {
+      setE("Please provide staff full name.");
+      return;
+    }
+    if (hasDigits(cleanName)) {
+      setE("Staff full name cannot contain numbers. Only letters and standard name characters are allowed.");
+      return;
+    }
+    if (!isValidName(cleanName)) {
+      setE("Please enter a valid staff full name (letters only, min 2 characters).");
+      return;
+    }
     if (staffForm.password.length < 10) {
       setE("Password must be at least 10 characters.");
       return;
@@ -810,7 +869,7 @@ function HospitalAdminDashboard({ me, openPatient }) {
                 </select>
               </label>
 
-              <Field l="Full Name *" required value={staffForm.full_name} onChange={setStaffForm("full_name")} />
+              <Field l="Full Name *" required value={staffForm.full_name} onChange={setStaffForm("full_name")} onKeyDown={blockNumbers} pattern="[A-Za-z\s.'-]+" title="Letters only, no numbers allowed" placeholder="e.g. Dr. Priya Nair" />
               <Field l="Work Email Address *" type="email" required value={staffForm.email} onChange={setStaffForm("email")} />
               <Field l="Password (minimum 10 characters) *" type="password" required value={staffForm.password} onChange={setStaffForm("password")} />
 
@@ -839,14 +898,37 @@ function PatientRegister({ open }) {
 
   const go = async (ev) => {
     ev.preventDefault();
-    if (!f.full_name.trim() || !f.date_of_birth || !f.local_patient_id.trim()) {
+    const cleanName = (f.full_name || "").trim();
+    if (!cleanName || !f.date_of_birth || !f.local_patient_id.trim()) {
       setE("Please provide patient full name, date of birth, and local hospital ID.");
+      return;
+    }
+    if (hasDigits(cleanName)) {
+      setE("Patient full name cannot contain numbers. Only letters and standard name characters are allowed.");
+      return;
+    }
+    if (!isValidName(cleanName)) {
+      setE("Please enter a valid patient full name (letters only, min 2 characters).");
+      return;
+    }
+    if (f.phone && !isValidPhone(f.phone)) {
+      setE("Please enter a valid phone number (10 to 15 digits, numbers only).");
+      return;
+    }
+    const dob = new Date(f.date_of_birth);
+    const today = new Date();
+    if (dob > today) {
+      setE("Date of birth cannot be in the future.");
+      return;
+    }
+    if (dob.getFullYear() < 1900) {
+      setE("Please enter a valid date of birth.");
       return;
     }
     setE("");
     setBusy(true);
     try {
-      const p = await api("/patients", { method: "POST", body: f });
+      const p = await api("/patients", { method: "POST", body: { ...f, full_name: cleanName } });
       open(p.id);
     } catch (x) {
       setE(x.message);
@@ -861,8 +943,24 @@ function PatientRegister({ open }) {
       <div className="panel" style={{ maxWidth: 640 }}>
         <p className="muted">Identity Verification: Arovia generates a globally unique patient identifier. Aadhaar numbers are NOT collected.</p>
         <form onSubmit={go}>
-          <Field l="Patient Full Name *" required value={f.full_name} onChange={set("full_name")} />
-          <Field l="Date of Birth *" type="date" required value={f.date_of_birth} onChange={set("date_of_birth")} />
+          <Field
+            l="Patient Full Name *"
+            required
+            value={f.full_name}
+            onChange={set("full_name")}
+            onKeyDown={blockNumbers}
+            pattern="[A-Za-z\s.'-]+"
+            title="Letters only, no numbers allowed"
+            placeholder="e.g. Ramesh Kumar"
+          />
+          <Field
+            l="Date of Birth *"
+            type="date"
+            required
+            max={new Date().toISOString().split("T")[0]}
+            value={f.date_of_birth}
+            onChange={set("date_of_birth")}
+          />
           <label>
             Sex *
             <select value={f.sex} onChange={set("sex")}>
@@ -872,9 +970,17 @@ function PatientRegister({ open }) {
               <option value="U">Unspecified</option>
             </select>
           </label>
-          <Field l="Phone Number (for verification)" type="tel" value={f.phone} onChange={set("phone")} />
-          <Field l="Address / Residential Area" value={f.address} onChange={set("address")} />
-          <Field l="Hospital Local Patient ID (Your facility record number) *" required value={f.local_patient_id} onChange={set("local_patient_id")} />
+          <Field
+            l="Phone Number (for verification, 10 digits)"
+            type="tel"
+            value={f.phone}
+            onChange={set("phone")}
+            pattern="\+?[0-9\s-]{10,15}"
+            title="10 to 15 digits, numbers only"
+            placeholder="e.g. 9876543210"
+          />
+          <Field l="Address / Residential Area" value={f.address} onChange={set("address")} placeholder="e.g. Indiranagar, Bengaluru" />
+          <Field l="Hospital Local Patient ID (Your facility record number) *" required value={f.local_patient_id} onChange={set("local_patient_id")} placeholder="e.g. MED-2026-0042" />
 
           <Err e={e} />
           <button type="submit" disabled={busy}>{busy ? "Registering..." : "Complete Registration"}</button>
