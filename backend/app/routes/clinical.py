@@ -107,7 +107,7 @@ def add_al(pid: int, b: AlIn, u=Depends(need("DOCTOR", "OPTOMETRIST")), c=Depend
 from psycopg.types.json import Json
 from fastapi.responses import FileResponse
 from ..quality import assess
-from .. import inference
+from .. import inference, gradcam
 UP = lambda: os.environ.get("UPLOAD_DIR", "../uploads")
 @r.post("/patients/{pid}/screenings")
 async def screening(pid: int, encounter_id: int = Form(...), eye: str = Form(...), image: UploadFile = File(...), u=Depends(need("DOCTOR", "OPTOMETRIST")), c=Depends(db)):
@@ -130,22 +130,63 @@ def _scr(c, u, sid, action):
 @r.get("/screenings/{sid}")
 def screening_detail(sid: int, u=Depends(need(*CLIN)), c=Depends(db)):
     s = _scr(c, u, sid, "VIEW_SCREENING"); s.pop("storage_ref")
-    pred = c.execute("SELECT p.dr_grade,p.confidence,m.name,m.version FROM screening_predictions p JOIN ml_models m ON m.id=p.model_id WHERE p.screening_id=%s ORDER BY p.id DESC LIMIT 1", (sid,)).fetchone()
+    pred = c.execute("SELECT p.dr_grade,p.confidence,p.gradcam_storage_ref,m.name,m.version FROM screening_predictions p JOIN ml_models m ON m.id=p.model_id WHERE p.screening_id=%s ORDER BY p.id DESC LIMIT 1", (sid,)).fetchone()
     rev = c.execute("SELECT final_grade,assessment,recommendations,created_at FROM screening_reviews WHERE screening_id=%s ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
     return {"screening": s, "prediction": pred, "review": rev}
 @r.get("/screenings/{sid}/image")
 def screening_image(sid: int, u=Depends(need(*CLIN)), c=Depends(db)):
     s = _scr(c, u, sid, "VIEW_RETINAL_IMAGE"); return FileResponse(os.path.join(UP(), s["storage_ref"]))
+@r.get("/screenings/{sid}/gradcam")
+def screening_gradcam(sid: int, u=Depends(need(*CLIN)), c=Depends(db)):
+    s = _scr(c, u, sid, "VIEW_GRADCAM")
+    pred = c.execute("SELECT dr_grade, gradcam_storage_ref FROM screening_predictions WHERE screening_id=%s ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+    if not pred:
+        raise HTTPException(404, "No prediction found for this screening")
+
+    # If already generated and file exists on disk
+    if pred.get("gradcam_storage_ref"):
+        cam_file = os.path.join(UP(), pred["gradcam_storage_ref"])
+        if os.path.exists(cam_file):
+            audit(c, u, "VIEW_GRADCAM", f"screening:{sid}")
+            return FileResponse(cam_file)
+
+    # Generate on-demand if missing for an existing prediction
+    try:
+        img_path = os.path.join(UP(), s["storage_ref"])
+        gradcam_ref = f"gradcam_{sid}_{uuid.uuid4().hex[:8]}.jpg"
+        out_path = os.path.join(UP(), gradcam_ref)
+        gradcam.generate_and_save_gradcam(img_path, out_path, target_class=pred["dr_grade"])
+        c.execute("UPDATE screening_predictions SET gradcam_storage_ref=%s WHERE screening_id=%s", (gradcam_ref, sid))
+        c.commit()
+        audit(c, u, "VIEW_GRADCAM", f"screening:{sid}")
+        return FileResponse(out_path)
+    except Exception as ex:
+        raise HTTPException(500, f"Could not generate Grad-CAM visualization: {ex}")
+
 @r.post("/screenings/{sid}/predict")
 def predict(sid: int, u=Depends(need("DOCTOR", "OPTOMETRIST")), c=Depends(db)):
     s = _scr(c, u, sid, "REQUEST_PREDICTION")
     if s["quality_status"] != "ACCEPTABLE": raise HTTPException(409, "Image was rejected at the quality check; no prediction is run. Upload a clearer image.")
     if s["status"] in ("AI_COMPLETE", "REVIEWED"): raise HTTPException(409, "Prediction already recorded")
-    try: res = inference.predict(os.path.join(UP(), s["storage_ref"]))
+    img_full_path = os.path.join(UP(), s["storage_ref"])
+    try: res = inference.predict(img_full_path)
     except inference.ModelNotReady as ex:
         c.execute("UPDATE screenings SET status='AWAITING_MODEL' WHERE id=%s", (sid,)); c.commit(); raise HTTPException(503, str(ex))
+
+    # Generate Grad-CAM explainability visualization
+    gradcam_ref = None
+    try:
+        gradcam_filename = f"gradcam_{sid}_{uuid.uuid4().hex[:8]}.jpg"
+        gradcam_full_path = os.path.join(UP(), gradcam_filename)
+        gradcam.generate_and_save_gradcam(img_full_path, gradcam_full_path, target_class=res["grade"])
+        gradcam_ref = gradcam_filename
+        res["has_gradcam"] = True
+    except Exception as cam_err:
+        res["has_gradcam"] = False
+        res["gradcam_error"] = str(cam_err)
+
     m = c.execute("INSERT INTO ml_models(name,version,is_active) VALUES(%s,%s,true) ON CONFLICT(name,version) DO UPDATE SET is_active=true RETURNING id", (res["name"], res["version"])).fetchone()
-    c.execute("INSERT INTO screening_predictions(screening_id,model_id,dr_grade,confidence) VALUES(%s,%s,%s,%s)", (sid, m["id"], res["grade"], res["confidence"]))
+    c.execute("INSERT INTO screening_predictions(screening_id,model_id,dr_grade,confidence,gradcam_storage_ref) VALUES(%s,%s,%s,%s,%s)", (sid, m["id"], res["grade"], res["confidence"], gradcam_ref))
     c.execute("UPDATE screenings SET status='AI_COMPLETE' WHERE id=%s", (sid,)); c.commit(); return res
 class RevIn(BaseModel): final_grade: int; assessment: str; recommendations: str | None = None
 @r.post("/screenings/{sid}/review")

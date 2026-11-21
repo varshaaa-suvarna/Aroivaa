@@ -1463,6 +1463,8 @@ function Screening({ pid, me, past, onDone, onRequestReferral }) {
   const [prev, setPrev] = useState(null);
   const [scr, setScr] = useState(null);
   const [img, setImg] = useState(null);
+  const [gradCamImg, setGradCamImg] = useState(null);
+  const [gradCamLoading, setGradCamLoading] = useState(false);
   const [e, setE] = useState("");
   const [busy, setBusy] = useState(false);
   const [rv, setRv] = useState({ final_grade: 0, assessment: "", recommendations: "" });
@@ -1476,11 +1478,24 @@ function Screening({ pid, me, past, onDone, onRequestReferral }) {
 
   const show = async (id) => {
     setE("");
+    setGradCamImg(null);
     try {
       const data = await api("/screenings/" + id);
       setScr(data);
       const url = await apiBlob(`/screenings/${id}/image`);
       setImg(url);
+
+      if (data.prediction) {
+        setGradCamLoading(true);
+        try {
+          const camUrl = await apiBlob(`/screenings/${id}/gradcam`);
+          setGradCamImg(camUrl);
+        } catch {
+          setGradCamImg(null);
+        } finally {
+          setGradCamLoading(false);
+        }
+      }
     } catch (x) {
       setE(x.message);
     }
@@ -1508,6 +1523,7 @@ function Screening({ pid, me, past, onDone, onRequestReferral }) {
   });
 
   const predict = () => run(async () => {
+    setGradCamLoading(true);
     await api(`/screenings/${scr.screening.id}/predict`, { method: "POST" });
     await show(scr.screening.id);
   });
@@ -1600,14 +1616,6 @@ function Screening({ pid, me, past, onDone, onRequestReferral }) {
       {/* SCREENING DETAILS & RESULTS */}
       {S && (
         <div style={{ marginTop: 16, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
-          {img && (
-            <img
-              src={img}
-              alt="retina"
-              style={{ maxWidth: 260, float: "right", marginLeft: 16, marginBottom: 16, border: "1px solid var(--line)", borderRadius: 4 }}
-            />
-          )}
-
           <p>
             <b>Quality Gate: </b>
             <span className={`badge ${S.quality_status === "ACCEPTABLE" ? "badge-ok" : "badge-err"}`}>
@@ -1628,6 +1636,63 @@ function Screening({ pid, me, past, onDone, onRequestReferral }) {
                 <b>Image Quality Rejected:</b> {q.reasons ? q.reasons.join("; ") : "Quality heuristic threshold failed."}
               </p>
               <span className="muted">AI prediction is withheld for unreadable or out-of-focus imagery. Please capture a clearer fundus photograph.</span>
+            </div>
+          )}
+
+          {/* VISUALIZATION: SIDE-BY-SIDE ORIGINAL & GRAD-CAM */}
+          {img && (
+            <div style={{ marginTop: 16, marginBottom: 16 }}>
+              <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+                {/* ORIGINAL RETINAL IMAGE */}
+                <div className="panel" style={{ padding: 12, margin: 0, background: "#FFF" }}>
+                  <h4 style={{ margin: "0 0 8px", fontSize: "1rem" }}>Original Retinal Fundus ({S.eye} Eye)</h4>
+                  <img
+                    src={img}
+                    alt="Original Fundus"
+                    style={{ width: "100%", maxHeight: 300, objectFit: "contain", borderRadius: 4, display: "block", background: "#000" }}
+                  />
+                  <p className="muted" style={{ margin: "6px 0 0", fontSize: ".8rem" }}>
+                    Captured retinal photograph verified by automated quality gate.
+                  </p>
+                </div>
+
+                {/* GRAD-CAM VISUALIZATION */}
+                {scr.prediction && (
+                  <div className="panel" style={{ padding: 12, margin: 0, background: "#FFF" }}>
+                    <div className="flex-between" style={{ marginBottom: 8 }}>
+                      <h4 style={{ margin: 0, fontSize: "1rem" }}>Grad-CAM Attention Heatmap</h4>
+                      <span className="badge badge-info">Explainable AI</span>
+                    </div>
+                    {gradCamLoading ? (
+                      <div style={{ height: 260, display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF5EA", borderRadius: 4 }}>
+                        <span className="muted">Generating neural activation map...</span>
+                      </div>
+                    ) : gradCamImg ? (
+                      <>
+                        <img
+                          src={gradCamImg}
+                          alt="Grad-CAM Heatmap"
+                          style={{ width: "100%", maxHeight: 300, objectFit: "contain", borderRadius: 4, display: "block", background: "#000" }}
+                        />
+                        <p className="muted" style={{ margin: "6px 0 0", fontSize: ".8rem" }}>
+                          Feature attribution for <b>{GRADES[scr.prediction.dr_grade]}</b>. Warmer colors (red/yellow) highlight focal retinal areas of highest model attention.
+                        </p>
+                      </>
+                    ) : (
+                      <div style={{ padding: 20, textAlign: "center", background: "#FAF5EA", borderRadius: 4 }}>
+                        <span className="muted">Grad-CAM visualization available upon AI prediction.</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* MEDICAL SAFETY DISCLAIMER */}
+              {scr.prediction && (
+                <div className="notice-box" style={{ marginTop: 12, borderLeftColor: "var(--maroon)", fontSize: ".82rem" }}>
+                  <b>Medical Safety Disclaimer:</b> Grad-CAM highlights image regions that influenced the AI model's prediction. It is an explanatory visualization and must not be interpreted as a confirmed clinical finding. Final assessment requires review by a qualified healthcare professional.
+                </div>
+              )}
             </div>
           )}
 
