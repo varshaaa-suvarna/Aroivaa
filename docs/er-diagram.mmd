@@ -1,0 +1,107 @@
+erDiagram
+  facilities ||--o{ users : employs
+  facilities |o--o{ hospital_applications : "created from"
+  hospital_applications ||--o{ facility_documents : has
+  hospital_applications ||--o{ application_status_history : tracks
+  users |o--o{ application_status_history : decides
+  patients ||--o{ hospital_patient_links : "known at"
+  facilities ||--o{ hospital_patient_links : holds
+  patients ||--o{ encounters : has
+  facilities ||--o{ encounters : hosts
+  users ||--o{ encounters : "doctor / creator"
+  encounters ||--o{ diagnoses : yields
+  encounters ||--o{ prescriptions : yields
+  patients ||--o{ diagnoses : has
+  patients ||--o{ prescriptions : has
+  patients ||--o{ allergies : has
+  users ||--o{ allergies : records
+  patients ||--o{ consent_records : gives
+  facilities ||--o{ consent_records : "granted to"
+  users ||--o{ access_logs : generates
+  patients ||--o{ screenings : undergoes
+  encounters ||--o{ screenings : includes
+  facilities ||--o{ screenings : performs
+  screenings ||--o{ retinal_images : stores
+  screenings ||--o{ screening_predictions : "AI output"
+  ml_models ||--o{ screening_predictions : produces
+  screenings ||--o{ screening_reviews : "doctor review"
+  users ||--o{ screening_reviews : writes
+  patients ||--o{ referrals : "referred as"
+  facilities ||--o{ referrals : "from / to"
+  users ||--o{ referrals : "refers"
+  encounters |o--o{ referrals : "related to"
+  screenings |o--o{ referrals : "related to"
+  referrals ||--o{ referral_status_history : tracks
+  facilities { bigint id PK
+    text name
+    text listing_status
+    text verification_status
+    text participation_status }
+  hospital_applications { bigint id PK
+    bigint facility_id FK
+    text status }
+  users { bigint id PK
+    text email UK
+    text role
+    bigint facility_id FK }
+  patients { bigint id PK
+    text arovia_id UK
+    text full_name
+    date date_of_birth }
+  hospital_patient_links { bigint id PK
+    bigint patient_id FK
+    bigint facility_id FK
+    text local_patient_id }
+  encounters { bigint id PK
+    bigint patient_id FK
+    bigint facility_id FK
+    timestamptz encounter_at }
+  diagnoses { bigint id PK
+    bigint encounter_id FK
+    text description }
+  prescriptions { bigint id PK
+    bigint encounter_id FK
+    text medication }
+  allergies { bigint id PK
+    bigint patient_id FK
+    text substance }
+  consent_records { bigint id PK
+    bigint patient_id FK
+    bigint granted_to_facility_id FK
+    text status }
+  access_logs { bigint id PK
+    bigint user_id FK
+    text action
+    text outcome }
+  screenings { bigint id PK
+    bigint patient_id FK
+    bigint encounter_id FK
+    text eye
+    text status }
+  retinal_images { bigint id PK
+    bigint screening_id FK
+    text storage_ref }
+  ml_models { bigint id PK
+    text name
+    text version }
+  screening_predictions { bigint id PK
+    bigint screening_id FK
+    bigint model_id FK
+    smallint dr_grade }
+  screening_reviews { bigint id PK
+    bigint screening_id FK
+    bigint reviewer_id FK
+    smallint final_grade }
+  referrals { bigint id PK
+    bigint patient_id FK
+    bigint from_facility_id FK
+    bigint to_facility_id FK
+    text status }
+  referral_status_history { bigint id PK
+    bigint referral_id FK
+    text to_status }
+  facility_documents { bigint id PK
+    bigint application_id FK }
+  application_status_history { bigint id PK
+    bigint application_id FK
+    text to_status }
