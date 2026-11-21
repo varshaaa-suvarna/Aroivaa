@@ -3,6 +3,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Ensure Keras directory stays inside the project workspace
+os.environ.setdefault("KERAS_HOME", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".keras"))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import auth_admin, clinical
