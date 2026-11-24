@@ -1175,6 +1175,8 @@ function PatientProfile({ id, me, onBack }) {
   const [e, setE] = useState("");
   const [msg, setMsg] = useState("");
   const [consents, setConsents] = useState([]);
+  const [facilitiesLoaded, setFacilitiesLoaded] = useState(false);
+  const [facilitiesLoadError, setFacilitiesLoadError] = useState("");
   const [consentFormOpen, setConsentFormOpen] = useState(false);
   const [consentForm, setConsentForm] = useForm({ granted_to_facility_id: "", purpose: "Care coordination", data_categories: "CLINICAL", valid_until: "", evidence_ref: "", patient_consent_confirmed: false });
   const [newSharingPassword, setNewSharingPassword] = useState("");
@@ -1201,9 +1203,17 @@ function PatientProfile({ id, me, onBack }) {
   });
 
   const load = () => {
+    setFacilitiesLoaded(false);
+    setFacilitiesLoadError("");
     api(`/patients/${id}`).then(setD).catch((x) => setE(x.message));
     api(`/patients/${id}/timeline`).then(setTl).catch(() => {});
-    api("/facilities").then(setFacilities).catch(() => {});
+    api("/facilities")
+      .then(setFacilities)
+      .catch((x) => {
+        setFacilitiesLoadError(x.message);
+        setE(x.message);
+      })
+      .finally(() => setFacilitiesLoaded(true));
     api("/clinical/doctors").then(setDoctors).catch(() => {});
     api(`/patients/${id}/consents`).then(setConsents).catch(() => {});
   };
@@ -1353,6 +1363,9 @@ function PatientProfile({ id, me, onBack }) {
   const isOptometrist = me.role === "OPTOMETRIST";
   const isHospitalAdmin = me.role === "HOSPITAL_ADMIN";
   const canManageClinical = isDoctor || isHospitalAdmin;
+  const activeReceivingFacilities = facilities.filter(
+    (facility) => facility.id !== me.facility_id && facility.participation_status === "ACTIVE"
+  );
 
   return (
     <>
@@ -1364,11 +1377,13 @@ function PatientProfile({ id, me, onBack }) {
             Arovia ID: <b>{p.arovia_id}</b> · DOB: {p.date_of_birth} · Sex: {p.sex} · Phone: {p.phone || "Not recorded"}
           </span>
         </div>
-        <div>
-          <span className={`badge ${p.identity_verification === "VERIFIED" ? "badge-ok" : "badge-warn"}`}>
-            Identity: {p.identity_verification}
-          </span>
-        </div>
+        {me.role === "SUPER_ADMIN" && (
+          <div>
+            <span className={`badge ${p.identity_verification === "VERIFIED" ? "badge-ok" : "badge-warn"}`}>
+              Identity: {p.identity_verification}
+            </span>
+          </div>
+        )}
       </div>
 
       <Err e={e} />
@@ -1382,13 +1397,14 @@ function PatientProfile({ id, me, onBack }) {
           {newSharingPassword && <SharingPasswordDisplay password={newSharingPassword} label="Share this password with the patient now:" />}
           <button className="sm sec" onClick={() => setConsentFormOpen(!consentFormOpen)}>{consentFormOpen ? "Close consent form" : "Record patient consent"}</button>
           {consentFormOpen && <form onSubmit={saveConsent} className="grid2" style={{ marginTop: 12 }}>
-            <label>Receiving hospital<select required value={consentForm.granted_to_facility_id} onChange={setConsentForm("granted_to_facility_id")}><option value="">Select active hospital</option>{facilities.filter(f => f.id !== me.facility_id && f.participation_status === "ACTIVE").map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>
+            <label>Receiving hospital<select required disabled={!facilitiesLoaded || Boolean(facilitiesLoadError) || activeReceivingFacilities.length === 0} value={consentForm.granted_to_facility_id} onChange={setConsentForm("granted_to_facility_id")}><option value="">{!facilitiesLoaded ? "Loading hospitals..." : facilitiesLoadError ? "Unable to load hospitals" : activeReceivingFacilities.length === 0 ? "No active hospitals available" : "Select active hospital"}</option>{activeReceivingFacilities.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>
+            {facilitiesLoaded && !facilitiesLoadError && activeReceivingFacilities.length === 0 && <p className="notice-box" role="status">No other hospitals are active yet. A Super Admin must activate a receiving hospital before you can record cross-hospital consent.</p>}
             <Field l="Purpose" required value={consentForm.purpose} onChange={setConsentForm("purpose")} />
             <label>Data category<select value={consentForm.data_categories} onChange={setConsentForm("data_categories")}><option value="CLINICAL">Clinical records</option><option value="ALL">All permitted clinical records</option></select></label>
             <Field l="Consent expires (optional)" type="date" value={consentForm.valid_until} onChange={setConsentForm("valid_until")} />
             <Field l="Consent documentation reference" required value={consentForm.evidence_ref} onChange={setConsentForm("evidence_ref")} placeholder="Form/reference stored by this hospital" />
             <label className="flex-gap"><input type="checkbox" checked={consentForm.patient_consent_confirmed} onChange={ev => setConsentForm("patient_consent_confirmed")({ target: { value: ev.target.checked }})} required /> Patient consent was obtained and documented</label>
-            <button type="submit">Record consent and grant access</button>
+            <button type="submit" disabled={!facilitiesLoaded || Boolean(facilitiesLoadError) || activeReceivingFacilities.length === 0}>Record consent and grant access</button>
           </form>}
           {consents.length > 0 && <div style={{ marginTop: 10 }}>{consents.map(c => <p key={c.id}>
             <b>{c.facility_name}</b> | {c.purpose} | {c.status}{c.valid_until ? " | until " + c.valid_until : " | no expiry"}
