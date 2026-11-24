@@ -45,7 +45,7 @@ def make_token(u):
 
 
 def audit(c, user, action, resource, outcome="ALLOWED",
-          patient_id=None, reason=None):
+          patient_id=None, reason=None, commit=True):
     c.execute(
         """INSERT INTO access_logs
         (user_id,facility_id,patient_id,action,resource,outcome,reason)
@@ -60,7 +60,8 @@ def audit(c, user, action, resource, outcome="ALLOWED",
             reason
         )
     )
-    c.commit()
+    if commit:
+        c.commit()
 
 
 def current_user(
@@ -106,29 +107,45 @@ def need(*roles):
 
     return dep
 
+def has_active_clinical_consent(c, patient_id, facility_id):
+    return bool(c.execute(
+        """SELECT 1 FROM consent_records
+        WHERE patient_id=%s AND granted_to_facility_id=%s AND status='ACTIVE'
+          AND valid_from<=CURRENT_DATE
+          AND (valid_until IS NULL OR valid_until>=CURRENT_DATE)
+          AND ('ALL'=ANY(data_categories) OR 'CLINICAL'=ANY(data_categories)) LIMIT 1""",
+        (patient_id,facility_id)
+    ).fetchone())
 
-def patient_access(c, u, pid, action):
-    """Facility-level rule: staff may access a patient only if
-    their facility holds a link to that patient."""
 
-    ok = (
-        u["role"] != "SUPER_ADMIN"
-        and c.execute(
-            """SELECT 1 FROM hospital_patient_links
-            WHERE patient_id=%s AND facility_id=%s""",
-            (pid, u["facility_id"])
-        ).fetchone()
-    )
+def has_active_patient_sharing_access(c, patient_id, facility_id):
+    return bool(c.execute(
+        """SELECT 1 FROM consent_records cr
+        JOIN patient_sharing_access_grants g
+          ON g.patient_id=cr.patient_id AND g.facility_id=cr.granted_to_facility_id
+        JOIN facilities f ON f.id=g.facility_id AND f.participation_status='ACTIVE'
+        WHERE cr.patient_id=%s AND cr.granted_to_facility_id=%s AND cr.status='ACTIVE'
+          AND cr.valid_from<=CURRENT_DATE AND (cr.valid_until IS NULL OR cr.valid_until>=CURRENT_DATE)
+          AND ('ALL'=ANY(cr.data_categories) OR 'CLINICAL'=ANY(cr.data_categories))
+          AND g.revoked_at IS NULL AND g.expires_at>now() LIMIT 1""",
+        (patient_id, facility_id)
+    ).fetchone())
 
-    audit(
-        c,
-        u,
-        action,
-        f"patient:{pid}",
-        "ALLOWED" if ok else "DENIED",
-        pid,
-        None if ok else "no facility link or consent"
-    )
+
+def patient_access(c, u, pid, action, commit=True):
+    """Allow the linked facility or a consented facility with an active password grant."""
+    linked = u["role"] != "SUPER_ADMIN" and c.execute(
+        """SELECT 1 FROM hospital_patient_links
+        WHERE patient_id=%s AND facility_id=%s""", (pid, u["facility_id"])
+    ).fetchone()
+    shared = u["role"] != "SUPER_ADMIN" and has_active_patient_sharing_access(c,pid,u["facility_id"])
+    ok = bool(linked or shared)
 
     if not ok:
-        raise HTTPException(403, "No access to this patient")
+        audit(c,u,action,f"patient:{pid}","DENIED",pid,"no facility link or active sharing grant")
+        raise HTTPException(403, "No access to this patient: facility link or active patient sharing grant required")
+    if commit:
+        audit(c,u,action,f"patient:{pid}","ALLOWED",pid)
+    else:
+        c.execute("""INSERT INTO access_logs(user_id,facility_id,patient_id,action,resource,outcome)
+            VALUES(%s,%s,%s,%s,%s,'ALLOWED')""", (u["id"],u["facility_id"],pid,action,f"patient:{pid}"))

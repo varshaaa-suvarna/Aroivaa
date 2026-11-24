@@ -18,7 +18,7 @@ CREATE TABLE facility_documents(
  doc_type TEXT NOT NULL, storage_ref TEXT NOT NULL, uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE users(
  id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE, full_name TEXT NOT NULL, password_hash TEXT NOT NULL,
- role TEXT NOT NULL CHECK (role IN ('SUPER_ADMIN','HOSPITAL_ADMIN','DOCTOR','OPTOMETRIST','REGISTRATION')),
+ role TEXT NOT NULL CHECK (role IN ('SUPER_ADMIN','HOSPITAL_ADMIN','DOCTOR','OPTOMETRIST')),
  facility_id BIGINT REFERENCES facilities(id), is_active BOOLEAN NOT NULL DEFAULT true,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  CHECK ((role='SUPER_ADMIN') = (facility_id IS NULL)));
@@ -29,7 +29,9 @@ CREATE TABLE application_status_history(
 CREATE TABLE patients(
  id BIGSERIAL PRIMARY KEY, arovia_id TEXT NOT NULL UNIQUE DEFAULT ('AR-'||upper(substr(md5(random()::text||clock_timestamp()::text),1,10))),
  full_name TEXT NOT NULL, date_of_birth DATE NOT NULL, sex TEXT CHECK (sex IN ('F','M','O','U')),
- phone TEXT, address TEXT, abha_id TEXT, identity_verification TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (identity_verification IN ('UNVERIFIED','VERIFIED')),
+ phone TEXT, email TEXT, address TEXT, blood_group TEXT CHECK (blood_group IN ('A+','A-','B+','B-','AB+','AB-','O+','O-','UNKNOWN')),
+ emergency_contact_name TEXT, emergency_contact_relationship TEXT, emergency_contact_phone TEXT,
+ abha_id TEXT, identity_verification TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (identity_verification IN ('UNVERIFIED','VERIFIED')),
  is_demo BOOLEAN NOT NULL DEFAULT false, created_by BIGINT REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE hospital_patient_links(
  id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), facility_id BIGINT NOT NULL REFERENCES facilities(id),
@@ -37,21 +39,33 @@ CREATE TABLE hospital_patient_links(
 CREATE TABLE encounters(
  id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), facility_id BIGINT NOT NULL REFERENCES facilities(id),
  encounter_at TIMESTAMPTZ NOT NULL DEFAULT now(), encounter_type TEXT NOT NULL, doctor_id BIGINT REFERENCES users(id),
- clinical_notes TEXT, treatment TEXT, follow_up TEXT, created_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ symptoms TEXT, observations TEXT, examination_findings TEXT, procedures TEXT, clinical_notes TEXT, treatment TEXT, follow_up TEXT, created_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE diagnoses(
- id BIGSERIAL PRIMARY KEY, encounter_id BIGINT NOT NULL REFERENCES encounters(id), patient_id BIGINT NOT NULL REFERENCES patients(id),
- description TEXT NOT NULL, icd10_code TEXT, recorded_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ id BIGSERIAL PRIMARY KEY, encounter_id BIGINT NOT NULL REFERENCES encounters(id), patient_id BIGINT NOT NULL REFERENCES patients(id), diagnosed_by BIGINT REFERENCES users(id),
+ description TEXT NOT NULL, icd10_code TEXT, identified_at TIMESTAMPTZ NOT NULL DEFAULT now(), status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','RESOLVED')),
+ recorded_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE prescriptions(
- id BIGSERIAL PRIMARY KEY, encounter_id BIGINT NOT NULL REFERENCES encounters(id), patient_id BIGINT NOT NULL REFERENCES patients(id),
- medication TEXT NOT NULL, dosage TEXT, frequency TEXT, duration TEXT, recorded_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ id BIGSERIAL PRIMARY KEY, encounter_id BIGINT NOT NULL REFERENCES encounters(id), patient_id BIGINT NOT NULL REFERENCES patients(id), prescribed_by BIGINT REFERENCES users(id),
+ medication TEXT NOT NULL, dosage TEXT, frequency TEXT, duration TEXT, instructions TEXT, recorded_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE allergies(
- id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), substance TEXT NOT NULL, reaction TEXT, severity TEXT,
+ id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), encounter_id BIGINT REFERENCES encounters(id), facility_id BIGINT NOT NULL REFERENCES facilities(id), substance TEXT NOT NULL, category TEXT, reaction TEXT, severity TEXT,
+ source_type TEXT NOT NULL DEFAULT 'CLINICIAN_RECORDED' CHECK(source_type IN ('PATIENT_REPORTED','CLINICIAN_RECORDED')),
+ recorded_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE patient_history_items(
+ id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), encounter_id BIGINT REFERENCES encounters(id), facility_id BIGINT NOT NULL REFERENCES facilities(id),
+ category TEXT NOT NULL CHECK(category IN ('CONDITION','CARDIAC','DIABETES','HYPERTENSION','ALLERGY','MEDICATION','SURGERY','OTHER')),
+ description TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('PATIENT_REPORTED','CLINICIAN_RECORDED')),
+ verified_by BIGINT REFERENCES users(id), recorded_by BIGINT NOT NULL REFERENCES users(id), recorded_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE investigations(
+ id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), encounter_id BIGINT REFERENCES encounters(id), facility_id BIGINT NOT NULL REFERENCES facilities(id),
+ kind TEXT NOT NULL CHECK(kind IN ('LABORATORY','IMAGING','OTHER')), name TEXT NOT NULL, result TEXT, report_ref TEXT, performed_at TIMESTAMPTZ,
  recorded_by BIGINT NOT NULL REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE consent_records(
  id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id), purpose TEXT NOT NULL, data_categories TEXT[] NOT NULL,
  granted_to_facility_id BIGINT NOT NULL REFERENCES facilities(id), valid_from DATE NOT NULL DEFAULT CURRENT_DATE, valid_until DATE,
  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVOKED','EXPIRED')),
- recorded_by BIGINT NOT NULL REFERENCES users(id), evidence_ref TEXT, revoked_at TIMESTAMPTZ, revoked_by BIGINT REFERENCES users(id), revocation_reason TEXT);
+ recorded_by BIGINT NOT NULL REFERENCES users(id), evidence_ref TEXT,
+ revoked_at TIMESTAMPTZ, revoked_by BIGINT REFERENCES users(id), revocation_reason TEXT);
 CREATE TABLE access_logs(
  id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id), facility_id BIGINT, patient_id BIGINT, action TEXT NOT NULL, resource TEXT,
  outcome TEXT NOT NULL CHECK (outcome IN ('ALLOWED','DENIED')), reason TEXT, at TIMESTAMPTZ NOT NULL DEFAULT now());
@@ -82,4 +96,19 @@ CREATE TABLE referrals(
 CREATE TABLE referral_status_history(
  id BIGSERIAL PRIMARY KEY, referral_id BIGINT NOT NULL REFERENCES referrals(id), from_status TEXT, to_status TEXT NOT NULL,
  changed_by BIGINT NOT NULL REFERENCES users(id), note TEXT, at TIMESTAMPTZ NOT NULL DEFAULT now());
+
+-- Cross-hospital patient sharing. Keep only a password hash; the raw password is
+-- returned once by the registration endpoint and must be given to the patient.
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS sharing_password_hash TEXT;
+CREATE TABLE IF NOT EXISTS patient_sharing_access_grants (
+ id BIGSERIAL PRIMARY KEY, patient_id BIGINT NOT NULL REFERENCES patients(id),
+ facility_id BIGINT NOT NULL REFERENCES facilities(id), granted_by BIGINT NOT NULL REFERENCES users(id),
+ granted_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ,
+ UNIQUE(patient_id, facility_id));
+CREATE TABLE IF NOT EXISTS patient_sharing_access_attempts (
+ patient_id BIGINT NOT NULL REFERENCES patients(id), facility_id BIGINT NOT NULL REFERENCES facilities(id),
+ failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0), locked_until TIMESTAMPTZ,
+ last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(patient_id, facility_id));
+CREATE INDEX IF NOT EXISTS patient_sharing_grant_active_idx
+ ON patient_sharing_access_grants(patient_id, facility_id, expires_at) WHERE revoked_at IS NULL;
 -- NOTE: if you created the DB before migration 002, run database/migrations/002_quality_and_model.sql

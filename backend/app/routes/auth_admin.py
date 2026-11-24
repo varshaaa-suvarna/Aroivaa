@@ -54,6 +54,16 @@ def create_hospital_admin(
         (b.email.lower(), b.full_name, hash_pw(b.password), fid)
     ).fetchone()
 
+    application = c.execute(
+        "SELECT id,status FROM hospital_applications WHERE facility_id=%s AND status IN ('APPROVED','ONBOARDING_IN_PROGRESS') FOR UPDATE",
+        (fid,)
+    ).fetchone()
+    c.execute("UPDATE facilities SET participation_status='ACTIVE' WHERE id=%s", (fid,))
+    if application:
+        c.execute("UPDATE hospital_applications SET status='ACTIVE' WHERE id=%s", (application["id"],))
+        c.execute("INSERT INTO application_status_history(application_id,from_status,to_status,decided_by,note) VALUES(%s,%s,'ACTIVE',%s,'Initial Hospital Admin provisioned')",
+                  (application["id"], application["status"], u["id"]))
+
     audit(c, u, "CREATE_HOSPITAL_ADMIN", f"facility:{fid}")
 
     return {
@@ -82,7 +92,7 @@ def me(u=Depends(current_user)): return u
 class Staff(BaseModel): email: EmailStr; full_name: str; password: str; role: str
 @r.post("/staff")
 def add_staff(b: Staff, u=Depends(need("HOSPITAL_ADMIN")), c=Depends(db)):
-    if b.role not in ("HOSPITAL_ADMIN", "DOCTOR", "OPTOMETRIST", "REGISTRATION"):
+    if b.role not in ("DOCTOR", "OPTOMETRIST"):
         raise HTTPException(422, "Invalid staff role")
     if len(b.password) < 10:
         raise HTTPException(422, "Password must be at least 10 characters")
@@ -126,22 +136,36 @@ def submit_app(b: App, c=Depends(db)):  # public: a hospital applies before it h
     a = c.execute("INSERT INTO hospital_applications(hospital_name,category,registration_no,address,phone,email,rep_name,rep_designation,rep_contact,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'SUBMITTED') RETURNING id", tuple(b.model_dump().values())).fetchone()
     c.execute("INSERT INTO application_status_history(application_id,to_status) VALUES(%s,'SUBMITTED')", (a["id"],)); c.commit(); return a
 @r.get("/applications")
-def apps(u=Depends(need("SUPER_ADMIN")), c=Depends(db)): return c.execute("SELECT * FROM hospital_applications ORDER BY created_at DESC LIMIT 200").fetchall()
+def apps(u=Depends(need("SUPER_ADMIN")), c=Depends(db)):
+    return c.execute("""SELECT a.*,
+        EXISTS(SELECT 1 FROM users hu WHERE hu.facility_id=a.facility_id AND hu.role='HOSPITAL_ADMIN' AND hu.is_active) AS has_hospital_admin
+        FROM hospital_applications a ORDER BY a.created_at DESC LIMIT 200""").fetchall()
 class Decision(BaseModel): status: str; note: str | None = None
 @r.post("/applications/{aid}/status")
 def decide(aid: int, b: Decision, u=Depends(need("SUPER_ADMIN")), c=Depends(db)):
+    allowed_statuses = {"DOCUMENTS_PENDING", "DOCUMENTS_UNDER_REVIEW", "VERIFICATION_IN_PROGRESS", "CLARIFICATION_REQUIRED", "APPROVED", "REJECTED", "ONBOARDING_IN_PROGRESS", "ACTIVE", "SUSPENDED", "REVOKED"}
+    if b.status not in allowed_statuses:
+        raise HTTPException(422, "Invalid application status")
     a = c.execute("SELECT * FROM hospital_applications WHERE id=%s FOR UPDATE", (aid,)).fetchone()
     if not a: raise HTTPException(404)
+    if b.status == "ACTIVE" and (not a["facility_id"] or not c.execute("SELECT 1 FROM users WHERE facility_id=%s AND role='HOSPITAL_ADMIN' AND is_active LIMIT 1", (a["facility_id"],)).fetchone()):
+        raise HTTPException(409, "Create the hospital administrator account before activating this facility")
     c.execute("UPDATE hospital_applications SET status=%s WHERE id=%s", (b.status, aid))
     c.execute("INSERT INTO application_status_history(application_id,from_status,to_status,decided_by,note) VALUES(%s,%s,%s,%s,%s)", (aid, a["status"], b.status, u["id"], b.note))
-    if b.status == "ONBOARDING_IN_PROGRESS" and not a["facility_id"]:
+    facility_id = a["facility_id"]
+    if b.status in ("APPROVED", "ONBOARDING_IN_PROGRESS") and not facility_id:
         f = c.execute("INSERT INTO facilities(name,category,registration_no,address,phone,email,verification_status,participation_status) VALUES(%s,%s,%s,%s,%s,%s,'VERIFIED','ONBOARDING_IN_PROGRESS') RETURNING id", (a["hospital_name"], a["category"], a["registration_no"], a["address"], a["phone"], a["email"])).fetchone()
         c.execute("UPDATE hospital_applications SET facility_id=%s WHERE id=%s", (f["id"], aid))
+        facility_id = f["id"]
     if b.status in ("ACTIVE", "SUSPENDED", "REVOKED") and a["facility_id"]:
         c.execute("UPDATE facilities SET participation_status=%s WHERE id=%s", (b.status, a["facility_id"]))
-    audit(c, u, "APPLICATION_STATUS", f"application:{aid}"); return {"ok": True}
+    audit(c, u, "APPLICATION_STATUS", f"application:{aid}")
+    return {"ok": True, "facility_id": facility_id, "status": b.status}
 @r.get("/facilities")
-def facilities(u=Depends(current_user), c=Depends(db)): return c.execute("SELECT id,name,category,listing_status,verification_status,participation_status FROM facilities ORDER BY name").fetchall()
+def facilities(u=Depends(current_user), c=Depends(db)):
+    return c.execute("""SELECT f.id,f.name,f.category,f.listing_status,f.verification_status,f.participation_status,
+        EXISTS(SELECT 1 FROM users hu WHERE hu.facility_id=f.id AND hu.role='HOSPITAL_ADMIN' AND hu.is_active) AS has_hospital_admin
+        FROM facilities f ORDER BY f.name""").fetchall()
 class Verification(BaseModel):
     status: str
 

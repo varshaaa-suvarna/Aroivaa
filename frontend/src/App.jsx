@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { api, apiBlob } from "./api.js";
 
 const Brand = () => (
@@ -12,6 +12,38 @@ const useForm = (init) => {
 };
 const Err = ({ e }) => (e ? <p className="err">{e}</p> : null);
 const Field = ({ l, ...p }) => <label>{l}<input {...p} /></label>;
+function SharingPasswordDisplay({ password, label = "Sharing password" }) {
+  const [copyStatus, setCopyStatus] = useState("");
+  const [copyFailed, setCopyFailed] = useState(false);
+
+  const copy = async () => {
+    setCopyStatus("");
+    setCopyFailed(false);
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard access is unavailable");
+      }
+      await navigator.clipboard.writeText(password);
+      setCopyStatus("Password copied.");
+    } catch {
+      setCopyFailed(true);
+      setCopyStatus("Copy failed. Select and copy the password above.");
+    }
+  };
+
+  return (
+    <div className="notice-box">
+      <b>{label}</b>
+      <div className="flex-gap" style={{ marginTop: 8, flexWrap: "wrap" }}>
+        <code style={{ userSelect: "all", fontSize: "1.2rem", fontWeight: 700, letterSpacing: "0.08em", padding: "6px 10px", background: "#fff" }}>
+          {password}
+        </code>
+        <button type="button" className="sm" onClick={copy}>Copy</button>
+      </div>
+      {copyStatus && <p className={copyFailed ? "err" : "success"} role="status">{copyStatus}</p>}
+    </div>
+  );
+}
 
 // Name and contact validators
 const NAME_REGEX = /^[A-Za-z\s.'-]{2,100}$/;
@@ -39,7 +71,6 @@ const ROLE_LABELS = {
   HOSPITAL_ADMIN: "Hospital Admin",
   DOCTOR: "Doctor",
   OPTOMETRIST: "Optometrist",
-  REGISTRATION: "Registration Staff"
 };
 
 const GRADES = [
@@ -176,7 +207,6 @@ function Login({ onLogin }) {
                 <option value="HOSPITAL_ADMIN">Hospital Admin</option>
                 <option value="DOCTOR">Doctor</option>
                 <option value="OPTOMETRIST">Optometrist</option>
-                <option value="REGISTRATION">Registration Staff</option>
               </select>
             </label>
 
@@ -300,6 +330,7 @@ function SuperAdminDashboard() {
   const [adminModalFid, setAdminModalFid] = useState(null);
   const [adminForm, setAdminForm] = useForm({ email: "", full_name: "", password: "" });
   const [adminBusy, setAdminBusy] = useState(false);
+  const autoPromptedAdminSetup = useRef(false);
 
   const loadData = () => {
     api("/stats").then(setStats).catch((x) => setE(x.message));
@@ -310,12 +341,31 @@ function SuperAdminDashboard() {
 
   useEffect(loadData, []);
 
+  useEffect(() => {
+    if (autoPromptedAdminSetup.current) return;
+    const pending = apps.find((application) =>
+      application.facility_id && !application.has_hospital_admin &&
+      ["APPROVED", "ONBOARDING_IN_PROGRESS"].includes(application.status)
+    );
+    if (!pending) return;
+    autoPromptedAdminSetup.current = true;
+    setAdminForm({ email: pending.email || "", full_name: pending.rep_name || "", password: "" });
+    setAdminModalFid(pending.facility_id);
+  }, [apps]);
+
   const changeAppStatus = async (aid, status) => {
     setE(""); setMsg("");
     try {
-      await api(`/applications/${aid}/status`, { method: "POST", body: { status } });
+      const result = await api(`/applications/${aid}/status`, { method: "POST", body: { status } });
       setMsg(`Application #${aid} status updated to ${status}.`);
       loadData();
+      if (["APPROVED", "ONBOARDING_IN_PROGRESS"].includes(status) && result.facility_id) {
+        const application = apps.find((item) => item.id === aid);
+        if (application && !application.has_hospital_admin) {
+          setAdminForm({ email: application.email || "", full_name: application.rep_name || "", password: "" });
+          setAdminModalFid(result.facility_id);
+        }
+      }
     } catch (x) {
       setE(x.message);
     }
@@ -447,6 +497,7 @@ function SuperAdminDashboard() {
                   <th>Registration No</th>
                   <th>Status</th>
                   <th>Change Status</th>
+                  <th>Onboarding</th>
                 </tr>
               </thead>
               <tbody>
@@ -484,6 +535,17 @@ function SuperAdminDashboard() {
                           "REVOKED"
                         ].map(t => <option key={t} value={t}>{t}</option>)}
                       </select>
+                    </td>
+                    <td>
+                      {!a.facility_id && a.status === "APPROVED" ? (
+                        <button className="sm alt" onClick={() => changeAppStatus(a.id, "APPROVED")}>Continue onboarding</button>
+                      ) : a.facility_id && !a.has_hospital_admin && ["APPROVED", "ONBOARDING_IN_PROGRESS"].includes(a.status) ? (
+                        <button className="sm alt" onClick={() => {
+                          setAdminForm({ email: a.email || "", full_name: a.rep_name || "", password: "" });
+                          setAdminModalFid(a.facility_id);
+                          setE("");
+                        }}>Create Hospital Admin</button>
+                      ) : a.has_hospital_admin ? <span className="badge badge-ok">Admin created</span> : <span className="muted">Approve to continue</span>}
                     </td>
                   </tr>
                 ))}
@@ -532,7 +594,7 @@ function SuperAdminDashboard() {
                       >
                         {f.verification_status === "VERIFIED" ? "Unverify" : "Verify"}
                       </button>
-                      {f.verification_status === "VERIFIED" && (
+                      {f.verification_status === "VERIFIED" && !f.has_hospital_admin && (
                         <button
                           className="sm alt"
                           onClick={() => { setAdminModalFid(f.id); setE(""); }}
@@ -609,7 +671,7 @@ function SuperAdminDashboard() {
 // -------------------------------------------------------------
 // HOSPITAL ADMIN DASHBOARD
 // -------------------------------------------------------------
-function HospitalAdminDashboard({ me, openPatient }) {
+function HospitalAdminDashboard({ me, openPatient, setPage }) {
   const [tab, setTab] = useState("overview");
   const [facility, setFacility] = useState(null);
   const [staffList, setStaffList] = useState([]);
@@ -709,6 +771,10 @@ function HospitalAdminDashboard({ me, openPatient }) {
 
       {tab === "overview" && (
         <>
+          <div className="panel flex-gap" style={{ marginBottom: 14 }}>
+            <button onClick={() => setPage("register")}>+ Register Patient</button>
+            <button className="sec" onClick={() => setPage("search")}>Search Patient Records</button>
+          </div>
           <div className="grid">
             <div className="panel stat">
               <b>{staffList.length}</b>
@@ -865,7 +931,6 @@ function HospitalAdminDashboard({ me, openPatient }) {
                 <select value={staffForm.role} onChange={setStaffForm("role")} required>
                   <option value="DOCTOR">Doctor</option>
                   <option value="OPTOMETRIST">Optometrist</option>
-                  <option value="REGISTRATION">Registration Staff</option>
                 </select>
               </label>
 
@@ -889,12 +954,13 @@ function HospitalAdminDashboard({ me, openPatient }) {
 // -------------------------------------------------------------
 // PATIENT REGISTRATION
 // -------------------------------------------------------------
-function PatientRegister({ open }) {
+function PatientRegister({ open, onSearch }) {
   const [f, set] = useForm({
-    full_name: "", date_of_birth: "", sex: "U", phone: "", address: "", local_patient_id: ""
+    full_name: "", date_of_birth: "", sex: "U", phone: "", email: "", address: "", blood_group: "", emergency_contact_name: "", emergency_contact_relationship: "", emergency_contact_phone: "", local_patient_id: ""
   });
   const [e, setE] = useState("");
   const [busy, setBusy] = useState(false);
+  const [createdPatient, setCreatedPatient] = useState(null);
 
   const go = async (ev) => {
     ev.preventDefault();
@@ -928,8 +994,8 @@ function PatientRegister({ open }) {
     setE("");
     setBusy(true);
     try {
-      const p = await api("/patients", { method: "POST", body: { ...f, full_name: cleanName } });
-      open(p.id);
+      const p = await api("/patients", { method: "POST", body: { ...f, blood_group: f.blood_group || null, full_name: cleanName } });
+      setCreatedPatient(p);
     } catch (x) {
       setE(x.message);
     } finally {
@@ -942,6 +1008,8 @@ function PatientRegister({ open }) {
       <h2>Register New Patient</h2>
       <div className="panel" style={{ maxWidth: 640 }}>
         <p className="muted">Identity Verification: Arovia generates a globally unique patient identifier. Aadhaar numbers are NOT collected.</p>
+        <p className="notice-box">Before creating a new identity, search the Arovia Patient ID. Cross-hospital records require active facility consent and the patient's sharing password.</p>
+        <button type="button" className="sec" onClick={onSearch} style={{ marginBottom: 12 }}>Search for an existing patient</button>
         <form onSubmit={go}>
           <Field
             l="Patient Full Name *"
@@ -979,13 +1047,28 @@ function PatientRegister({ open }) {
             title="10 to 15 digits, numbers only"
             placeholder="e.g. 9876543210"
           />
+          <Field l="Email address" type="email" value={f.email} onChange={set("email")} />
           <Field l="Address / Residential Area" value={f.address} onChange={set("address")} placeholder="e.g. Indiranagar, Bengaluru" />
+          <label>Blood group<select value={f.blood_group} onChange={set("blood_group")}><option value="">Unknown / not provided</option>{["A+","A-","B+","B-","AB+","AB-","O+","O-"].map(x => <option key={x}>{x}</option>)}</select></label>
+          <h4>Emergency Contact (optional)</h4>
+          <Field l="Contact name" value={f.emergency_contact_name} onChange={set("emergency_contact_name")} />
+          <Field l="Relationship" value={f.emergency_contact_relationship} onChange={set("emergency_contact_relationship")} />
+          <Field l="Contact phone" type="tel" value={f.emergency_contact_phone} onChange={set("emergency_contact_phone")} />
           <Field l="Hospital Local Patient ID (Your facility record number) *" required value={f.local_patient_id} onChange={set("local_patient_id")} placeholder="e.g. MED-2026-0042" />
 
           <Err e={e} />
           <button type="submit" disabled={busy}>{busy ? "Registering..." : "Complete Registration"}</button>
         </form>
       </div>
+      {createdPatient && <div className="modal-overlay"><div className="modal-box">
+        <h3>Patient sharing password</h3>
+        <p>Give this password to the patient. It is shown once and cannot be recovered from the hospital system.</p>
+        <p><b>Arovia Patient ID:</b> <code>{createdPatient.arovia_id}</code></p>
+        <SharingPasswordDisplay password={createdPatient.sharing_password} />
+        <div className="flex-gap">
+          <button className="sec" onClick={() => open(createdPatient.id)}>Continue to patient record</button>
+        </div>
+      </div></div>}
     </>
   );
 }
@@ -999,6 +1082,8 @@ function PatientSearch({ open, role }) {
   const [e, setE] = useState("");
   const [busy, setBusy] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [sharePassword, setSharePassword] = useState("");
+  const [shareBusy, setShareBusy] = useState(false);
 
   const go = async (ev) => {
     if (ev) ev.preventDefault();
@@ -1014,6 +1099,15 @@ function PatientSearch({ open, role }) {
     }
   };
 
+  const openSharedPatient = async (ev) => {
+    ev.preventDefault(); setE(""); setShareBusy(true);
+    try {
+      const result = await api("/patients/share-access", { method: "POST", body: { arovia_id: q.trim(), sharing_password: sharePassword } });
+      open(result.patient_id);
+    } catch (x) { setE(x.message); }
+    finally { setShareBusy(false); }
+  };
+
   useEffect(() => { go(); }, []);
 
   return (
@@ -1022,7 +1116,7 @@ function PatientSearch({ open, role }) {
       <div className="panel">
         <form onSubmit={go} className="flex-gap" style={{ marginBottom: 12 }}>
           <input
-            placeholder="Search by Patient Name, Arovia ID (AR-...), or Local Hospital ID"
+            placeholder="Search by name, Arovia ID (AR-...), or local hospital ID"
             value={q}
             onChange={(x) => setQ(x.target.value)}
             style={{ margin: 0 }}
@@ -1032,7 +1126,13 @@ function PatientSearch({ open, role }) {
         <Err e={e} />
 
         {rows.length === 0 && hasSearched ? (
-          <p className="muted" style={{ padding: 12 }}>No matching patient records found in your facility registry.</p>
+          <>
+            <p className="muted" style={{ padding: 12 }}>No local patient matched. To open a cross-hospital record, the patient's current hospital must have recorded consent for your facility. Enter the patient sharing password to verify access.</p>
+            {/^AR-[A-Z0-9]+$/i.test(q.trim()) && <form onSubmit={openSharedPatient} className="flex-gap" style={{ padding: 12 }}>
+              <input type="password" autoComplete="off" placeholder="Patient sharing password" required value={sharePassword} onChange={ev => setSharePassword(ev.target.value)} />
+              <button disabled={shareBusy}>{shareBusy ? "Verifying..." : "Verify and open record"}</button>
+            </form>}
+          </>
         ) : (
           <table>
             <thead>
@@ -1049,11 +1149,11 @@ function PatientSearch({ open, role }) {
                 <tr key={p.id}>
                   <td><b>{p.full_name}</b></td>
                   <td><code>{p.arovia_id}</code></td>
-                  <td>{p.local_patient_id}</td>
+                  <td>{p.local_patient_id || "Shared after password verification"}</td>
                   <td>{p.date_of_birth}</td>
                   <td>
                     <button className="sm" onClick={() => open(p.id)}>
-                      {role === "REGISTRATION" ? "View Demographics" : "Open Record"}
+                      Open Record
                     </button>
                   </td>
                 </tr>
@@ -1074,16 +1174,23 @@ function PatientProfile({ id, me, onBack }) {
   const [tl, setTl] = useState([]);
   const [e, setE] = useState("");
   const [msg, setMsg] = useState("");
+  const [consents, setConsents] = useState([]);
+  const [consentFormOpen, setConsentFormOpen] = useState(false);
+  const [consentForm, setConsentForm] = useForm({ granted_to_facility_id: "", purpose: "Care coordination", data_categories: "CLINICAL", valid_until: "", evidence_ref: "", patient_consent_confirmed: false });
+  const [newSharingPassword, setNewSharingPassword] = useState("");
+  const [doctors, setDoctors] = useState([]);
 
   // Encounter modal
   const [encModal, setEncModal] = useState(false);
-  const [enc, setEnc] = useForm({ encounter_type: "OUTPATIENT", clinical_notes: "", treatment: "", follow_up: "" });
+  const [enc, setEnc] = useForm({ encounter_type: "OUTPATIENT", doctor_id: me.role === "DOCTOR" ? String(me.id) : "", symptoms: "", observations: "", examination_findings: "", procedures: "", clinical_notes: "", treatment: "", follow_up: "" });
 
   // Clinical items modal (Doctor only)
   const [itemModal, setItemModal] = useState(null); // 'dx', 'rx', 'al'
-  const [dx, setDx] = useForm({ encounter_id: "", description: "", icd10_code: "" });
-  const [rx, setRx] = useForm({ encounter_id: "", medication: "", dosage: "", frequency: "", duration: "" });
-  const [al, setAl] = useForm({ substance: "", reaction: "", severity: "MILD" });
+  const [dx, setDx] = useForm({ encounter_id: "", description: "", icd10_code: "", identified_at: "", diagnosed_by: me.role === "DOCTOR" ? String(me.id) : "" });
+  const [rx, setRx] = useForm({ encounter_id: "", medication: "", dosage: "", frequency: "", duration: "", instructions: "", prescribed_by: me.role === "DOCTOR" ? String(me.id) : "" });
+  const [al, setAl] = useForm({ substance: "", encounter_id: "", category: "", reaction: "", severity: "MILD", source_type: me.role === "HOSPITAL_ADMIN" ? "PATIENT_REPORTED" : "CLINICIAN_RECORDED" });
+  const [historyForm, setHistoryForm] = useForm({ category: "OTHER", description: "", source_type: "PATIENT_REPORTED", encounter_id: "" });
+  const [investigationForm, setInvestigationForm] = useForm({ kind: "LABORATORY", name: "", result: "", encounter_id: "", performed_at: "" });
 
   // Referral creation modal (Doctor only)
   const [refModal, setRefModal] = useState(false);
@@ -1097,6 +1204,8 @@ function PatientProfile({ id, me, onBack }) {
     api(`/patients/${id}`).then(setD).catch((x) => setE(x.message));
     api(`/patients/${id}/timeline`).then(setTl).catch(() => {});
     api("/facilities").then(setFacilities).catch(() => {});
+    api("/clinical/doctors").then(setDoctors).catch(() => {});
+    api(`/patients/${id}/consents`).then(setConsents).catch(() => {});
   };
 
   useEffect(load, [id]);
@@ -1105,14 +1214,57 @@ function PatientProfile({ id, me, onBack }) {
     ev.preventDefault();
     setE("");
     try {
-      await api(`/patients/${id}/encounters`, { method: "POST", body: enc });
+      await api(`/patients/${id}/encounters`, { method: "POST", body: { ...enc, doctor_id: enc.doctor_id ? Number(enc.doctor_id) : null } });
       setEncModal(false);
-      setEnc({ encounter_type: "OUTPATIENT", clinical_notes: "", treatment: "", follow_up: "" });
+      setEnc({ encounter_type: "OUTPATIENT", doctor_id: me.role === "DOCTOR" ? String(me.id) : "", symptoms: "", observations: "", examination_findings: "", procedures: "", clinical_notes: "", treatment: "", follow_up: "" });
       setMsg("Clinical encounter recorded.");
       load();
     } catch (x) {
       setE(x.message);
     }
+  };
+
+  const addHistoryItem = async (ev) => {
+    ev.preventDefault(); setE("");
+    try { await api(`/patients/${id}/medical-history`, { method: "POST", body: { ...historyForm, encounter_id: Number(historyForm.encounter_id) } }); setHistoryForm({ category: "OTHER", description: "", source_type: "PATIENT_REPORTED", encounter_id: "" }); setMsg("Medical history saved with its source status."); load(); }
+    catch (x) { setE(x.message); }
+  };
+
+  const addInvestigation = async (ev) => {
+    ev.preventDefault(); setE("");
+    try { await api(`/patients/${id}/investigations`, { method: "POST", body: { ...investigationForm, encounter_id: investigationForm.encounter_id ? Number(investigationForm.encounter_id) : null, performed_at: investigationForm.performed_at || null } }); setInvestigationForm({ kind: "LABORATORY", name: "", result: "", encounter_id: "", performed_at: "" }); setMsg("Investigation recorded."); load(); }
+    catch (x) { setE(x.message); }
+  };
+
+  const revokeConsent = async (consentId) => {
+    try { await api("/patients/" + id + "/consents/" + consentId + "/revoke", { method: "POST" }); setMsg("Consent revoked."); load(); }
+    catch (x) { setE(x.message); }
+  };
+
+  const provisionSharingPassword = async () => {
+    setE("");
+    try {
+      const result = await api(`/patients/${id}/sharing-password`, { method: "POST" });
+      setNewSharingPassword(result.sharing_password);
+      setD(current => ({ ...current, patient: { ...current.patient, sharing_password_provisioned: true } }));
+      setMsg("Sharing password created. Provide it to the patient now; it cannot be viewed again.");
+    } catch (x) { setE(x.message); }
+  };
+
+  const saveConsent = async (ev) => {
+    ev.preventDefault(); setE("");
+    try {
+      await api("/patients/" + id + "/consents", { method: "POST", body: {
+        ...consentForm,
+        granted_to_facility_id: Number(consentForm.granted_to_facility_id),
+        valid_until: consentForm.valid_until || null,
+        data_categories: [consentForm.data_categories]
+      }});
+      setConsentFormOpen(false);
+      setConsentForm({ granted_to_facility_id: "", purpose: "Care coordination", data_categories: "CLINICAL", valid_until: "", evidence_ref: "", patient_consent_confirmed: false });
+      setMsg("Patient consent recorded. The selected hospital can now access permitted clinical history.");
+      load();
+    } catch (x) { setE(x.message); }
   };
 
   const addDiagnosis = async (ev) => {
@@ -1121,15 +1273,20 @@ function PatientProfile({ id, me, onBack }) {
     try {
       await api(`/patients/${id}/diagnoses`, {
         method: "POST",
-        body: { ...dx, encounter_id: Number(dx.encounter_id) }
+        body: { ...dx, encounter_id: Number(dx.encounter_id), identified_at: dx.identified_at || null, diagnosed_by: dx.diagnosed_by ? Number(dx.diagnosed_by) : null }
       });
       setItemModal(null);
-      setDx({ encounter_id: "", description: "", icd10_code: "" });
+      setDx({ encounter_id: "", description: "", icd10_code: "", identified_at: "", diagnosed_by: me.role === "DOCTOR" ? String(me.id) : "" });
       setMsg("Diagnosis added.");
       load();
     } catch (x) {
       setE(x.message);
     }
+  };
+
+  const setDiagnosisStatus = async (diagnosisId, status) => {
+    try { await api(`/patients/${id}/diagnoses/${diagnosisId}`, { method: "PATCH", body: { status } }); setMsg("Diagnosis status updated; encounter history is preserved."); load(); }
+    catch (x) { setE(x.message); }
   };
 
   const addPrescription = async (ev) => {
@@ -1138,10 +1295,10 @@ function PatientProfile({ id, me, onBack }) {
     try {
       await api(`/patients/${id}/prescriptions`, {
         method: "POST",
-        body: { ...rx, encounter_id: Number(rx.encounter_id) }
+        body: { ...rx, encounter_id: Number(rx.encounter_id), prescribed_by: rx.prescribed_by ? Number(rx.prescribed_by) : null }
       });
       setItemModal(null);
-      setRx({ encounter_id: "", medication: "", dosage: "", frequency: "", duration: "" });
+      setRx({ encounter_id: "", medication: "", dosage: "", frequency: "", duration: "", instructions: "", prescribed_by: me.role === "DOCTOR" ? String(me.id) : "" });
       setMsg("Prescription recorded.");
       load();
     } catch (x) {
@@ -1153,9 +1310,9 @@ function PatientProfile({ id, me, onBack }) {
     ev.preventDefault();
     setE("");
     try {
-      await api(`/patients/${id}/allergies`, { method: "POST", body: al });
+      await api(`/patients/${id}/allergies`, { method: "POST", body: { ...al, encounter_id: Number(al.encounter_id) } });
       setItemModal(null);
-      setAl({ substance: "", reaction: "", severity: "MILD" });
+      setAl({ substance: "", encounter_id: "", category: "", reaction: "", severity: "MILD", source_type: me.role === "HOSPITAL_ADMIN" ? "PATIENT_REPORTED" : "CLINICIAN_RECORDED" });
       setMsg("Allergy record created.");
       load();
     } catch (x) {
@@ -1194,7 +1351,8 @@ function PatientProfile({ id, me, onBack }) {
   const p = d.patient;
   const isDoctor = me.role === "DOCTOR";
   const isOptometrist = me.role === "OPTOMETRIST";
-  const isRegistration = me.role === "REGISTRATION";
+  const isHospitalAdmin = me.role === "HOSPITAL_ADMIN";
+  const canManageClinical = isDoctor || isHospitalAdmin;
 
   return (
     <>
@@ -1216,23 +1374,33 @@ function PatientProfile({ id, me, onBack }) {
       <Err e={e} />
       {msg && <p className="success">{msg}</p>}
 
-      {/* REGISTRATION STAFF DEMOGRAPHIC VIEW ONLY */}
-      {isRegistration ? (
+      {(isDoctor || me.role === "HOSPITAL_ADMIN") && (
         <div className="panel" style={{ marginTop: 14 }}>
-          <h3>Patient Demographic Details</h3>
-          <p><b>Address:</b> {p.address || "No address on record"}</p>
-          <p><b>Registration Date:</b> {new Date(p.created_at).toLocaleDateString()}</p>
-          <p className="notice-box">
-            Clinical records (diagnoses, prescriptions, screenings) are restricted to authorized medical personnel (Doctor and Optometrist roles).
-          </p>
+          <h3>Cross-hospital sharing consent</h3>
+          <p className="muted">Record the patient's documented consent for a receiving hospital. The receiving hospital must also verify the patient's sharing password; access expires after 60 minutes. Every access attempt is audited.</p>
+          {p.is_linked_to_facility && !p.sharing_password_provisioned && <button className="sm alt" onClick={provisionSharingPassword}>Create patient sharing password</button>}
+          {newSharingPassword && <SharingPasswordDisplay password={newSharingPassword} label="Share this password with the patient now:" />}
+          <button className="sm sec" onClick={() => setConsentFormOpen(!consentFormOpen)}>{consentFormOpen ? "Close consent form" : "Record patient consent"}</button>
+          {consentFormOpen && <form onSubmit={saveConsent} className="grid2" style={{ marginTop: 12 }}>
+            <label>Receiving hospital<select required value={consentForm.granted_to_facility_id} onChange={setConsentForm("granted_to_facility_id")}><option value="">Select active hospital</option>{facilities.filter(f => f.id !== me.facility_id && f.participation_status === "ACTIVE").map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>
+            <Field l="Purpose" required value={consentForm.purpose} onChange={setConsentForm("purpose")} />
+            <label>Data category<select value={consentForm.data_categories} onChange={setConsentForm("data_categories")}><option value="CLINICAL">Clinical records</option><option value="ALL">All permitted clinical records</option></select></label>
+            <Field l="Consent expires (optional)" type="date" value={consentForm.valid_until} onChange={setConsentForm("valid_until")} />
+            <Field l="Consent documentation reference" required value={consentForm.evidence_ref} onChange={setConsentForm("evidence_ref")} placeholder="Form/reference stored by this hospital" />
+            <label className="flex-gap"><input type="checkbox" checked={consentForm.patient_consent_confirmed} onChange={ev => setConsentForm("patient_consent_confirmed")({ target: { value: ev.target.checked }})} required /> Patient consent was obtained and documented</label>
+            <button type="submit">Record consent and grant access</button>
+          </form>}
+          {consents.length > 0 && <div style={{ marginTop: 10 }}>{consents.map(c => <p key={c.id}>
+            <b>{c.facility_name}</b> | {c.purpose} | {c.status}{c.valid_until ? " | until " + c.valid_until : " | no expiry"}
+            {c.status === "ACTIVE" && <button className="sm danger" style={{ marginLeft: 8 }} onClick={() => revokeConsent(c.id)}>Revoke</button>}
+          </p>)}</div>}
         </div>
-      ) : (
-        /* DOCTOR, OPTOMETRIST, AND HOSPITAL ADMIN CLINICAL VIEW */
-        <>
+      )}
+      <>
           <div className="panel" style={{ marginTop: 14 }}>
             <div className="flex-between">
               <h3>Clinical Overview</h3>
-              {isDoctor && (
+              {canManageClinical && (
                 <div className="flex-gap">
                   <button className="sm alt" onClick={() => setItemModal("al")}>+ Allergy</button>
                   <button className="sm alt" onClick={() => setItemModal("dx")}>+ Diagnosis</button>
@@ -1278,6 +1446,43 @@ function PatientProfile({ id, me, onBack }) {
             </div>
           </div>
 
+          <div className="panel">
+            <div className="flex-between"><h3>Medical History Across Facilities</h3><span className="muted">Arovia ID: {p.arovia_id}</span></div>
+            <p><b>Personal:</b> {p.email || "No email"} · Blood group: {p.blood_group || "Unknown"} · Emergency contact: {p.emergency_contact_name ? `${p.emergency_contact_name} (${p.emergency_contact_relationship || "relationship not recorded"}) ${p.emergency_contact_phone || ""}` : "Not recorded"}</p>
+            <h4>Reported / verified background</h4>
+            {(d.history_items || []).filter(h => h.category !== "MEDICATION").length ? d.history_items.filter(h => h.category !== "MEDICATION").map(h => <p key={`h${h.id}`}><b>{h.category}</b> — {h.description} <span className="muted">· {h.source_type.replaceAll("_", " ")} · {h.facility_name} · {h.recorder_name} · {new Date(h.recorded_at).toLocaleDateString()}</span></p>) : <p className="muted">No medical background recorded.</p>}
+            {(canManageClinical || isOptometrist) && <form onSubmit={addHistoryItem} className="flex-gap" style={{ flexWrap: "wrap", alignItems: "end" }}>
+              <label>Encounter<select required value={historyForm.encounter_id} onChange={setHistoryForm("encounter_id")}><option value="">Select encounter</option>{(d.encounters || []).filter(x => x.facility_id === me.facility_id).map(x => <option key={x.id} value={x.id}>#{x.id} · {new Date(x.encounter_at).toLocaleDateString()}</option>)}</select></label>
+              <label>Category<select value={historyForm.category} onChange={setHistoryForm("category")}>{[["CONDITION","Condition"],["CARDIAC","Cardiac"],["DIABETES","Diabetes"],["HYPERTENSION","Hypertension"],["ALLERGY","Allergy"],["MEDICATION","Medication"],["SURGERY","Surgery"],["OTHER","Other"]].map(([v,l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+              <label>Source<select value={historyForm.source_type} onChange={setHistoryForm("source_type")}><option value="PATIENT_REPORTED">Patient reported</option>{(isDoctor || isOptometrist) && <option value="CLINICIAN_RECORDED">Clinician recorded</option>}</select></label>
+              <Field l="Details" required value={historyForm.description} onChange={setHistoryForm("description")} />
+              <button type="submit">Add history</button>
+            </form>}
+
+            <h4>Medication History</h4>
+            {(d.history_items || []).filter(h => h.category === "MEDICATION").map(h => <p key={`mh${h.id}`}><b>{h.description}</b> · {h.source_type.replaceAll("_", " ")} · {h.facility_name} · {h.recorder_name} · {new Date(h.recorded_at).toLocaleDateString()}</p>)}
+            {(d.history_items || []).every(h => h.category !== "MEDICATION") && <p className="muted">No separate medication history recorded.</p>}
+            <h4>Clinical Encounters</h4>
+            {(d.encounters || []).map(x => <p key={`e${x.id}`}><b>{new Date(x.encounter_at).toLocaleString()} · {x.encounter_type}</b> — {x.facility_name} · {x.doctor_name || "Provider not specified"}<br/><span className="muted">{[x.symptoms && `Symptoms: ${x.symptoms}`, x.observations && `Observations: ${x.observations}`, x.examination_findings && `Exam: ${x.examination_findings}`, x.procedures && `Procedures: ${x.procedures}`, x.clinical_notes && `Notes: ${x.clinical_notes}`, x.treatment && `Treatment: ${x.treatment}`].filter(Boolean).join(" · ")}</span></p>)}
+            <h4>Diagnoses and Conditions</h4>
+            {(d.diagnoses || []).map(x => <p key={`d${x.id}`}><b>{x.description}</b> {x.icd10_code && `(${x.icd10_code})`} · {x.status} · {x.facility_name} · Diagnosed by {x.diagnosing_doctor || x.recorder_name} · recorded by {x.recorder_name} · {new Date(x.identified_at).toLocaleDateString()} {isDoctor && x.facility_id === me.facility_id && x.status === "ACTIVE" && <button type="button" className="sm sec" onClick={() => setDiagnosisStatus(x.id, "RESOLVED")}>Mark resolved</button>}</p>)}
+            <h4>Allergies</h4>
+            {(d.allergies || []).map(x => <p key={`a${x.id}`}><b>{x.substance}</b> {x.category && `· ${x.category}`} · {x.reaction || "Reaction not recorded"} · {x.severity || "Severity unknown"} · {x.source_type?.replaceAll("_", " ")} · {x.facility_name} · {x.recorder_name}</p>)}
+            <h4>Prescriptions</h4>
+            {(d.prescriptions || []).map(x => <p key={`rx${x.id}`}><b>{x.medication}</b> · {x.dosage || "Dose not recorded"} · {x.frequency || "Frequency not recorded"} · {x.duration || "Duration not recorded"} {x.instructions && `· ${x.instructions}`} · {x.facility_name} · {x.prescriber_name}{x.recorder_name !== x.prescriber_name ? ` (recorded by ${x.recorder_name})` : ""}</p>)}
+            <h4>Investigations and Reports</h4>
+            {(d.investigations || []).map(x => <p key={`i${x.id}`}><b>{x.kind}: {x.name}</b> · {x.result || "Result not recorded"} · {x.facility_name} · {x.recorder_name} {x.report_ref && <a href={x.report_ref} target="_blank" rel="noreferrer">View report</a>}</p>)}
+            {(canManageClinical || isOptometrist) && <form onSubmit={addInvestigation} className="flex-gap" style={{ flexWrap: "wrap", alignItems: "end" }}>
+              <label>Type<select value={investigationForm.kind} onChange={setInvestigationForm("kind")}><option value="LABORATORY">Laboratory</option><option value="IMAGING">Imaging</option><option value="OTHER">Other</option></select></label>
+              <Field l="Test / report name" required value={investigationForm.name} onChange={setInvestigationForm("name")} />
+              <Field l="Result summary" value={investigationForm.result} onChange={setInvestigationForm("result")} />
+              <label>Encounter (optional)<select value={investigationForm.encounter_id} onChange={setInvestigationForm("encounter_id")}><option value="">None</option>{(d.encounters || []).filter(x => x.facility_id === me.facility_id).map(x => <option key={x.id} value={x.id}>#{x.id} · {new Date(x.encounter_at).toLocaleDateString()}</option>)}</select></label>
+              <button type="submit">Record investigation</button>
+            </form>}
+            <h4>Referrals</h4>
+            {(d.referrals || []).map(x => <p key={`ref${x.id}`}><b>{x.specialty}</b> · {x.status} · {x.priority} · {x.reason} · {x.source_facility_name} → {x.target_facility_name} · {x.responsible_doctor} · {new Date(x.created_at).toLocaleDateString()}</p>)}
+          </div>
+
           {/* RETINAL SCREENING WORKFLOW */}
           <Screening pid={id} me={me} past={d.screenings} onDone={load} onRequestReferral={(sid) => {
             setRefForm({ ...refForm, screening_id: sid });
@@ -1288,7 +1493,7 @@ function PatientProfile({ id, me, onBack }) {
           <div className="panel">
             <div className="flex-between">
               <h3>Longitudinal Timeline</h3>
-              {(isDoctor || isOptometrist) && (
+              {(canManageClinical || isOptometrist) && (
                 <button className="sm" onClick={() => setEncModal(true)}>+ New Encounter</button>
               )}
             </div>
@@ -1301,14 +1506,13 @@ function PatientProfile({ id, me, onBack }) {
                   <div key={i}>
                     <b>{t.kind}</b> <span className="muted">({new Date(t.at).toLocaleString()})</span>
                     <div>{t.detail}</div>
+                    {(t.facility_name || t.professional_name) && <small className="muted">{[t.facility_name, t.professional_name].filter(Boolean).join(" · ")}</small>}
                   </div>
                 ))
               )}
             </div>
           </div>
         </>
-      )}
-
       {/* NEW ENCOUNTER MODAL */}
       {encModal && (
         <div className="modal-overlay">
@@ -1325,7 +1529,12 @@ function PatientProfile({ id, me, onBack }) {
                   <option value="SCREENING">Retinal Screening</option>
                 </select>
               </label>
+              <label>Responsible doctor<select value={enc.doctor_id} onChange={setEnc("doctor_id")}><option value="">Unassigned</option>{doctors.map(x => <option key={x.id} value={x.id}>{x.full_name}{x.id === me.id ? " (you)" : ""}</option>)}</select></label>
               <label>Clinical Notes<textarea rows="3" value={enc.clinical_notes} onChange={setEnc("clinical_notes")} /></label>
+              <label>Symptoms and Complaints<textarea rows="2" value={enc.symptoms} onChange={setEnc("symptoms")} /></label>
+              <label>Clinical Observations<textarea rows="2" value={enc.observations} onChange={setEnc("observations")} /></label>
+              <label>Examination Findings<textarea rows="2" value={enc.examination_findings} onChange={setEnc("examination_findings")} /></label>
+              <label>Clinical Procedures<textarea rows="2" value={enc.procedures} onChange={setEnc("procedures")} placeholder="Procedure name and relevant details" /></label>
               <label>Treatment Provided<textarea rows="2" value={enc.treatment} onChange={setEnc("treatment")} /></label>
               <label>Follow-up Plan<input value={enc.follow_up} onChange={setEnc("follow_up")} /></label>
               <div className="flex-gap">
@@ -1346,15 +1555,13 @@ function PatientProfile({ id, me, onBack }) {
               <label>Encounter *
                 <select value={dx.encounter_id} onChange={setDx("encounter_id")} required>
                   <option value="">Select Encounter</option>
-                  {tl.filter(t => t.kind.startsWith("Encounter")).map((t, idx) => (
-                    <option key={idx} value={t.at}>Encounter at {new Date(t.at).toLocaleDateString()}</option>
-                  ))}
-                  {/* Fallback to patient's encounter ID */}
-                  {d.screenings[0] && <option value={d.screenings[0].encounter_id}>Encounter #{d.screenings[0].encounter_id}</option>}
+                  {(d.encounters || []).filter(x => x.facility_id === me.facility_id).map(x => <option key={x.id} value={x.id}>Encounter #{x.id} · {new Date(x.encounter_at).toLocaleDateString()}</option>)}
                 </select>
               </label>
+              <label>Diagnosing doctor<select value={dx.diagnosed_by} onChange={setDx("diagnosed_by")}><option value="">Unassigned</option>{doctors.map(x => <option key={x.id} value={x.id}>{x.full_name}{x.id === me.id ? " (you)" : ""}</option>)}</select></label>
               <Field l="Condition / Diagnosis Description *" required value={dx.description} onChange={setDx("description")} />
               <Field l="ICD-10 Code (e.g. E11.319 for Diabetic Retinopathy)" value={dx.icd10_code} onChange={setDx("icd10_code")} />
+              <Field l="Date identified (optional)" type="date" value={dx.identified_at} onChange={setDx("identified_at")} />
               <div className="flex-gap">
                 <button type="submit">Add Diagnosis</button>
                 <button type="button" className="sec" onClick={() => setItemModal(null)}>Cancel</button>
@@ -1373,13 +1580,15 @@ function PatientProfile({ id, me, onBack }) {
               <label>Encounter *
                 <select value={rx.encounter_id} onChange={setRx("encounter_id")} required>
                   <option value="">Select Encounter</option>
-                  {d.screenings[0] && <option value={d.screenings[0].encounter_id}>Encounter #{d.screenings[0].encounter_id}</option>}
+                  {(d.encounters || []).filter(x => x.facility_id === me.facility_id).map(x => <option key={x.id} value={x.id}>Encounter #{x.id} · {new Date(x.encounter_at).toLocaleDateString()}</option>)}
                 </select>
               </label>
+              <label>Prescribing doctor<select value={rx.prescribed_by} onChange={setRx("prescribed_by")}><option value="">Unassigned</option>{doctors.map(x => <option key={x.id} value={x.id}>{x.full_name}{x.id === me.id ? " (you)" : ""}</option>)}</select></label>
               <Field l="Medication Name *" required value={rx.medication} onChange={setRx("medication")} />
               <Field l="Dosage (e.g. 500mg, 1 drop)" value={rx.dosage} onChange={setRx("dosage")} />
               <Field l="Frequency (e.g. Twice daily, Once at bedtime)" value={rx.frequency} onChange={setRx("frequency")} />
               <Field l="Duration (e.g. 14 days, 1 month)" value={rx.duration} onChange={setRx("duration")} />
+              <Field l="Instructions" value={rx.instructions} onChange={setRx("instructions")} />
               <div className="flex-gap">
                 <button type="submit">Record Prescription</button>
                 <button type="button" className="sec" onClick={() => setItemModal(null)}>Cancel</button>
@@ -1395,7 +1604,10 @@ function PatientProfile({ id, me, onBack }) {
           <div className="modal-box">
             <h3>Add Allergy Record</h3>
             <form onSubmit={addAllergy}>
+              <label>Encounter *<select required value={al.encounter_id} onChange={setAl("encounter_id")}><option value="">Select encounter</option>{(d.encounters || []).filter(x => x.facility_id === me.facility_id).map(x => <option key={x.id} value={x.id}>#{x.id} · {new Date(x.encounter_at).toLocaleDateString()}</option>)}</select></label>
               <Field l="Substance / Allergen *" required value={al.substance} onChange={setAl("substance")} />
+              <Field l="Allergy category" value={al.category} onChange={setAl("category")} />
+              <label>Information source<select value={al.source_type} onChange={setAl("source_type")}><option value="PATIENT_REPORTED">Patient reported</option>{(isDoctor || isOptometrist) && <option value="CLINICIAN_RECORDED">Clinician verified</option>}</select></label>
               <Field l="Reaction" value={al.reaction} onChange={setAl("reaction")} />
               <label>Severity
                 <select value={al.severity} onChange={setAl("severity")}>
@@ -1419,7 +1631,7 @@ function PatientProfile({ id, me, onBack }) {
         <div className="modal-overlay">
           <div className="modal-box">
             <h3>Create Medical Referral</h3>
-            <p className="muted">Direct inter-hospital referral exchange with Arovia Network</p>
+            <p className="muted">Patient ID: <b>{p.arovia_id}</b> · Direct inter-hospital referral exchange</p>
             <form onSubmit={createReferral}>
               <label>
                 Target Facility / Receiving Hospital *
@@ -1471,9 +1683,16 @@ function Screening({ pid, me, past, onDone, onRequestReferral }) {
 
   useEffect(() => {
     api(`/patients/${pid}/encounters`).then((x) => {
-      setEncs(x);
-      if (x[0]) setEncId(x[0].id);
-    }).catch(() => {});
+      setEncs(x || []);
+      if (x && x.length > 0) {
+        setEncId(x[0].id);
+      } else {
+        setEncId("auto");
+      }
+    }).catch(() => {
+      setEncs([]);
+      setEncId("auto");
+    });
   }, [pid]);
 
   const show = async (id) => {
@@ -1806,6 +2025,8 @@ function ReferralManager({ me, openPatient }) {
   // Status transition note modal
   const [statusModal, setStatusModal] = useState(null); // { rid, to }
   const [statusNote, setStatusNote] = useState("");
+  const [detail, setDetail] = useState(null);
+  const [followUp, setFollowUp] = useState("");
 
   const load = () => {
     api("/referrals").then(setRefs).catch((x) => setE(x.message));
@@ -1832,6 +2053,21 @@ function ReferralManager({ me, openPatient }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const openDetail = async (rid) => {
+    setE("");
+    try { setDetail(await api(`/referrals/${rid}`)); }
+    catch (x) { setE(x.message); }
+  };
+  const saveFollowUp = async (ev) => {
+    ev.preventDefault(); if (!detail || !followUp.trim()) return;
+    setBusy(true); setE("");
+    try {
+      await api(`/referrals/${detail.referral.id}/follow-ups`, { method: "POST", body: { action: followUp.trim() } });
+      setFollowUp(""); await openDetail(detail.referral.id); setMsg("Follow-up action recorded.");
+    } catch (x) { setE(x.message); }
+    finally { setBusy(false); }
   };
 
   return (
@@ -1868,6 +2104,7 @@ function ReferralManager({ me, openPatient }) {
                   <th>Specialty</th>
                   <th>Priority</th>
                   <th>Reason</th>
+                  <th>Patient ID</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -1889,9 +2126,11 @@ function ReferralManager({ me, openPatient }) {
                       </span>
                     </td>
                     <td>{r.reason}</td>
+                    <td>{r.arovia_id}</td>
                     <td><span className="badge badge-neutral">{r.status}</span></td>
                     <td>
                       <div className="flex-gap">
+                        <button className="sm sec" onClick={() => openDetail(r.id)}>History / Follow-up</button>
                         {r.status === "SENT" && (
                           <>
                             <button className="sm" onClick={() => updateStatus(r.id, "ACCEPTED")}>Accept</button>
@@ -1928,6 +2167,7 @@ function ReferralManager({ me, openPatient }) {
                   <th>Target Facility</th>
                   <th>Specialty</th>
                   <th>Priority</th>
+                  <th>Reason</th>
                   <th>Status</th>
                   <th>Action</th>
                 </tr>
@@ -1948,8 +2188,10 @@ function ReferralManager({ me, openPatient }) {
                         {r.priority}
                       </span>
                     </td>
+                    <td>{r.reason}</td>
                     <td><span className="badge badge-neutral">{r.status}</span></td>
                     <td>
+                      <button className="sm sec" onClick={() => openDetail(r.id)}>History / Follow-up</button>
                       {(r.status === "CREATED" || r.status === "SENT") && (
                         <button className="sm danger" onClick={() => updateStatus(r.id, "CANCELLED")}>Cancel</button>
                       )}
@@ -1982,6 +2224,27 @@ function ReferralManager({ me, openPatient }) {
               </button>
               <button className="sec" onClick={() => setStatusModal(null)}>Cancel</button>
             </div>
+          </div>
+        </div>
+      )}
+      {detail && (
+        <div className="modal-overlay">
+          <div className="modal-box">
+            <h3>Referral #{detail.referral.id} · {detail.referral.status}</h3>
+            <p><b>Patient:</b> {detail.referral.full_name} ({detail.referral.arovia_id})</p>
+            <p><b>Reason:</b> {detail.referral.reason}</p>
+            {detail.referral.clinical_notes && <p><b>Clinical notes:</b> {detail.referral.clinical_notes}</p>}
+            <h4>Status history and follow-up actions</h4>
+            <div className="panel">
+              {detail.history.map(h => <p key={h.id}><b>{new Date(h.at).toLocaleString()}</b> · {h.from_status ? `${h.from_status} → ${h.to_status}` : h.to_status} · {h.changed_by_name || "User"}{h.note ? ` — ${h.note}` : ""}</p>)}
+            </div>
+            {detail.referral.status !== "REJECTED" && detail.referral.status !== "CANCELLED" && (
+              <form onSubmit={saveFollowUp}>
+                <label>Record follow-up action<textarea rows="3" value={followUp} onChange={ev => setFollowUp(ev.target.value)} required maxLength={2000} /></label>
+                <button disabled={busy || !followUp.trim()}>Save Follow-up</button>
+              </form>
+            )}
+            <button className="sec" onClick={() => setDetail(null)}>Close</button>
           </div>
         </div>
       )}
@@ -2127,35 +2390,6 @@ function OptometristDashboard({ me, openPatient, setPage }) {
 }
 
 // -------------------------------------------------------------
-// REGISTRATION STAFF DASHBOARD
-// -------------------------------------------------------------
-function RegistrationDashboard({ me, openPatient, setPage }) {
-  return (
-    <>
-      <div className="flex-between">
-        <div>
-          <h2>Patient Registration Desk: {me.full_name}</h2>
-          <span className="muted">Demographics, Identity Intake & Patient Search</span>
-        </div>
-        <span className="badge badge-neutral">Registration Staff</span>
-      </div>
-
-      <div className="panel" style={{ marginTop: 14 }}>
-        <h3>Patient Registration & Identity Workflow</h3>
-        <p className="muted">
-          Arovia assigns globally unique patient IDs to prevent duplicate registrations and protect privacy.
-          Do not collect or store national Aadhaar numbers.
-        </p>
-        <div className="flex-gap" style={{ marginTop: 14 }}>
-          <button onClick={() => setPage("register")}>+ Register New Patient</button>
-          <button className="sec" onClick={() => setPage("search")}>Search Patient Registry</button>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// -------------------------------------------------------------
 // MAIN APPLICATION COMPONENT & ROUTER
 // -------------------------------------------------------------
 export default function App() {
@@ -2205,25 +2439,20 @@ export default function App() {
       case "HOSPITAL_ADMIN":
         return [
           ["home", "Hospital Overview"],
+          ["register", "Register Patient"],
           ["search", "Patient Search"],
           ["audit", "Access Audit"]
         ];
       case "DOCTOR":
         return [
           ["home", "Doctor Dashboard"],
-          ["search", "Patient Search"],
           ["register", "Register Patient"],
+          ["search", "Patient Search"],
           ["referrals", "Referral Exchange"]
         ];
       case "OPTOMETRIST":
         return [
           ["home", "Optometrist Station"],
-          ["search", "Patient Search"],
-          ["register", "Register Patient"]
-        ];
-      case "REGISTRATION":
-        return [
-          ["home", "Registration Desk"],
           ["register", "Register Patient"],
           ["search", "Patient Search"]
         ];
@@ -2264,7 +2493,7 @@ export default function App() {
         {page === "profile" && pid ? (
           <PatientProfile id={pid} me={me} onBack={() => setPage("search")} />
         ) : page === "register" ? (
-          <PatientRegister open={openPatient} />
+          <PatientRegister open={openPatient} onSearch={() => setPage("search")} />
         ) : page === "search" ? (
           <PatientSearch open={openPatient} role={me.role} />
         ) : page === "referrals" ? (
@@ -2272,13 +2501,13 @@ export default function App() {
         ) : me.role === "SUPER_ADMIN" ? (
           <SuperAdminDashboard />
         ) : me.role === "HOSPITAL_ADMIN" ? (
-          <HospitalAdminDashboard me={me} openPatient={openPatient} />
+          <HospitalAdminDashboard me={me} openPatient={openPatient} setPage={setPage} />
         ) : me.role === "DOCTOR" ? (
           <DoctorDashboard me={me} openPatient={openPatient} setPage={setPage} />
         ) : me.role === "OPTOMETRIST" ? (
           <OptometristDashboard me={me} openPatient={openPatient} setPage={setPage} />
         ) : (
-          <RegistrationDashboard me={me} openPatient={openPatient} setPage={setPage} />
+          <div className="panel">This account role is not supported. Please contact your system administrator.</div>
         )}
       </main>
     </div>
